@@ -52,7 +52,9 @@ def status():
 @cli.command()
 def ingest():
     """Read raw email from stdin, parse, and forward to agent webhook."""
-    click.echo("Not yet implemented — Story 2")
+    from parousia.guard.ingest import main as ingest_main
+
+    ingest_main()
 
 
 @cli.command()
@@ -66,7 +68,17 @@ def serve(mode_rest, mode_mcp, mode_all):
         mode_mcp = True
 
     if mode_rest:
-        click.echo("Not yet implemented — Story 2 (REST)")
+        import uvicorn
+
+        click.echo("Starting REST ingress server on 127.0.0.1:8080")
+        uvicorn.run(
+            "parousia.guard.rest_server:app",
+            host="127.0.0.1",
+            port=8080,
+            log_level="info",
+        )
+        return  # uvicorn.run blocks
+
     if mode_mcp:
         click.echo("Not yet implemented — Story 3 (MCP)")
 

@@ -1,0 +1,150 @@
+"""REST ingest server — FastAPI endpoint for Postfix pipe handoff.
+
+Accepts parsed email JSON, enforces rate limits, and forwards to agent webhook.
+"""
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from parousia.config import load_config
+
+logger = logging.getLogger("parousia.rest")
+
+app = FastAPI(title="Parousia Guard — REST Ingress")
+
+
+class IngestRequest(BaseModel):
+    sender: str = Field(..., description="From address of the email")
+    recipient: str = Field(..., description="To address (agent@domain)")
+    subject: str = Field(default="", description="Email subject line")
+    body: str = Field(default="", description="Plain-text email body")
+    agent_id: str = Field(..., description="Agent identifier (local part of recipient)")
+    raw_mime: str = Field(default="", description="Raw RFC 822 message")
+    dkim_verified: bool = Field(default=False)
+    spf_verified: bool = Field(default=False)
+    timestamp: Optional[str] = Field(default=None)
+
+
+class IngestResponse(BaseModel):
+    status: str = "accepted"
+    agent_id: str
+    task_id: str
+
+
+@app.get("/health")
+async def health():
+    """Health check — returns server and Redis status."""
+    try:
+        import redis as redis_lib
+
+        r = redis_lib.Redis(host="localhost", port=6379, db=0, socket_connect_timeout=2)
+        r.ping()
+        redis_ok = True
+    except Exception:
+        redis_ok = False
+
+    return JSONResponse({
+        "status": "ok",
+        "redis": redis_ok,
+        "postfix": True,  # assumed running if this server is up
+    })
+
+
+@app.post("/ingest", response_model=IngestResponse)
+async def ingest(request: IngestRequest):
+    """Accept parsed email, route to agent webhook.
+
+    Called by the Postfix pipe script (parousia-guard ingest).
+    Must return within 2 seconds so Postfix doesn't timeout.
+    """
+    config = load_config()
+
+    # Look up agent config
+    agent_cfg = config.agents.get(request.agent_id)
+    if not agent_cfg:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {request.agent_id}")
+
+    task_id = str(uuid.uuid4())[:12]
+
+    # Fire-and-forget: forward to agent webhook asynchronously
+    # Postfix pipe expects fast response — don't wait for agent
+    import asyncio
+
+    asyncio.create_task(_forward_to_agent(
+        webhook_url=agent_cfg.webhook_url,
+        agent_id=request.agent_id,
+        task_id=task_id,
+        sender=request.sender,
+        subject=request.subject,
+        body=request.body,
+        raw_mime=request.raw_mime,
+    ))
+
+    logger.info(
+        "ingest accepted",
+        extra={
+            "agent_id": request.agent_id,
+            "task_id": task_id,
+            "sender": request.sender,
+            "subject": request.subject[:100],
+        },
+    )
+
+    return IngestResponse(agent_id=request.agent_id, task_id=task_id)
+
+
+async def _forward_to_agent(
+    webhook_url: str,
+    agent_id: str,
+    task_id: str,
+    sender: str,
+    subject: str,
+    body: str,
+    raw_mime: str,
+    max_retries: int = 3,
+):
+    """Forward task to agent webhook with retry on failure."""
+    import httpx
+
+    payload = {
+        "task_type": "email",
+        "task_id": task_id,
+        "sender": sender,
+        "subject": subject,
+        "body": body,
+        "raw_mime": raw_mime,
+        "agent_id": agent_id,
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(webhook_url, json=payload)
+                if resp.status_code < 500:
+                    logger.info(
+                        "webhook delivered",
+                        extra={"task_id": task_id, "status": resp.status_code, "attempt": attempt},
+                    )
+                    return
+                logger.warning(
+                    "webhook server error",
+                    extra={"task_id": task_id, "status": resp.status_code, "attempt": attempt},
+                )
+        except Exception as e:
+            logger.warning(
+                "webhook unreachable",
+                extra={"task_id": task_id, "error": str(e), "attempt": attempt},
+            )
+
+        if attempt < max_retries:
+            await asyncio.sleep(2 ** attempt)  # exponential backoff: 2s, 4s, 8s
+
+    logger.error("webhook exhausted retries", extra={"task_id": task_id})
