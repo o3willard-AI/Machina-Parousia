@@ -1,0 +1,75 @@
+"""CLI entry point for parousia-guard."""
+
+import click
+
+from parousia import __version__
+
+
+@click.group()
+@click.version_option(version=__version__, prog_name="parousia-guard")
+def cli():
+    """Parousia Agentic Mail Server Guard.
+
+    Postfix pipe-to-agent gateway with push-based ingest,
+    MCP outbound tool, and Redis-backed rate limiting.
+    """
+    pass
+
+
+@cli.command()
+def setup():
+    """Configure Postfix, DKIM, and guard components."""
+    click.echo("Not yet implemented — Story 5 (Postfix) + Story 6 (DKIM)")
+
+
+@cli.command()
+def validate():
+    """Validate the Parousia installation."""
+    from parousia.config import load_config
+
+    try:
+        config = load_config()
+        click.echo(f"✓ Config loaded: domain={config.domain}")
+    except Exception as e:
+        click.echo(f"✗ Config error: {e}", err=True)
+        raise SystemExit(1)
+
+    click.echo("Not yet implemented — Story 5")
+
+
+@cli.command()
+def test():
+    """Send a test email and verify delivery."""
+    click.echo("Not yet implemented — Story 5")
+
+
+@cli.command()
+def status():
+    """Show rate limits, queue health, and recent activity."""
+    click.echo("Not yet implemented — Story 5")
+
+
+@cli.command()
+def ingest():
+    """Read raw email from stdin, parse, and forward to agent webhook."""
+    click.echo("Not yet implemented — Story 2")
+
+
+@cli.command()
+@click.option("--rest", "mode_rest", is_flag=True, help="Start REST ingress server")
+@click.option("--mcp", "mode_mcp", is_flag=True, help="Start MCP outbound server")
+@click.option("--all", "mode_all", is_flag=True, help="Start both servers")
+def serve(mode_rest, mode_mcp, mode_all):
+    """Start Parousia guard servers."""
+    if mode_all or (not mode_rest and not mode_mcp):
+        mode_rest = True
+        mode_mcp = True
+
+    if mode_rest:
+        click.echo("Not yet implemented — Story 2 (REST)")
+    if mode_mcp:
+        click.echo("Not yet implemented — Story 3 (MCP)")
+
+
+if __name__ == "__main__":
+    cli()
