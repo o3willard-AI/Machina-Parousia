@@ -80,7 +80,11 @@ def serve(mode_rest, mode_mcp, mode_all):
         return  # uvicorn.run blocks
 
     if mode_mcp:
-        click.echo("Not yet implemented — Story 3 (MCP)")
+        from parousia.guard.mcp_server import main as mcp_main
+
+        click.echo("Starting MCP outbound server (stdio transport)")
+        mcp_main()
+        return  # mcp_main blocks
 
 
 if __name__ == "__main__":
