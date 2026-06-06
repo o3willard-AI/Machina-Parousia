@@ -19,8 +19,50 @@ def cli():
 @cli.command()
 @click.option("--postfix", is_flag=True, help="Configure Postfix aliases for pipe-to-agent delivery.")
 @click.option("--dkim", is_flag=True, help="Generate DKIM keys and DNS records (Story 6).")
-def setup(postfix, dkim):
+@click.option("--config", "gen_config", is_flag=True, help="Generate /etc/parousia/config.yaml with defaults.")
+def setup(postfix, dkim, gen_config):
     """Configure Parousia components: Postfix aliases or DKIM keys."""
+    if gen_config:
+        import os
+        import yaml
+        from parousia.config import ParousiaConfig
+
+        config_path = "/etc/parousia/config.yaml"
+        user_path = os.path.expanduser("~/.parousia/config.yaml")
+
+        # Pick writable path
+        if os.access(os.path.dirname(config_path) or "/etc", os.W_OK):
+            target = config_path
+        else:
+            target = user_path
+
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+
+        if os.path.exists(target):
+            click.secho(f"⚠ Config already exists: {target}", fg="yellow")
+            if not click.confirm("Overwrite?"):
+                return
+
+        defaults = ParousiaConfig()
+        config_data = {
+            "domain": defaults.domain,
+            "hostname": defaults.hostname,
+            "agents": {},
+            "redis": {"host": "localhost", "port": 6379, "db": 0},
+            "rate_limits": {"per_agent_per_hour": 100, "domain_per_day": 500},
+            "postfix": {"aliases_file": "/etc/aliases", "guard_script": "/usr/local/bin/parousia-guard"},
+            "dkim": {"key_dir": "/etc/parousia/dkim", "selector": "default"},
+            "server": {"rest_host": "127.0.0.1", "rest_port": 8080, "mcp_host": "0.0.0.0", "mcp_port": 8081},
+            "logging": {"level": "info", "format": "json", "output": "syslog"},
+        }
+
+        with open(target, "w") as f:
+            yaml.safe_dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+        click.secho(f"✓ Config written to {target}", fg="green")
+        click.echo(f"  Edit {target} to set your domain, agent webhooks, and rate limits.")
+        return
+
     if dkim:
         import os
         from parousia.cli.dkim import generate_dkim_keys
@@ -48,9 +90,10 @@ def setup(postfix, dkim):
         return
 
     if not postfix:
-        click.echo("Usage: parousia-guard setup [--postfix | --dkim]")
+        click.echo("Usage: parousia-guard setup [--postfix | --dkim | --config]")
         click.echo("  --postfix    Configure Postfix aliases for pipe-to-agent delivery")
         click.echo("  --dkim       Generate DKIM keys and DNS records")
+        click.echo("  --config     Generate config file with defaults")
         return
 
     # ── Postfix alias setup ──────────────────────────────────────
