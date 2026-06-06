@@ -1,13 +1,13 @@
 """MCP outbound server for Parousia Guard.
 
-Exposes a send_email tool to AI agents via MCP protocol (stdio transport).
-Rate-limited via RateLimiter before SMTP send.
+Exposes a send_email tool (Phase 1) and temporal tools (Phase 2)
+to AI agents via MCP protocol (stdio transport).
 """
 
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import redis as redis_lib
 from mcp.server import Server
@@ -17,15 +17,25 @@ from mcp.types import TextContent, Tool
 from parousia.config import load_config
 from parousia.guard.email_sender import send_email as _smtp_send
 from parousia.guard.rate_limiter import RateLimiter
+from parousia.temporal.db import TemporalDB
+from parousia.temporal.tools import ALL_TEMPORAL_SCHEMAS, TemporalToolHandlers
 
 logger = logging.getLogger("parousia.mcp")
 
 
+def _resolve_agent_id(config, arguments: dict) -> str:
+    """Resolve agent_id from arguments, then config fallback."""
+    if arguments.get("agent_id"):
+        return arguments["agent_id"]
+    agent_ids = list(config.agents.keys())
+    return agent_ids[0] if agent_ids else "default"
+
+
 def _build_server() -> Server:
-    """Create and configure the MCP server with send_email tool."""
+    """Create and configure the MCP server with email + temporal tools."""
     config = load_config()
 
-    # Initialize rate limiter
+    # Initialize rate limiter (Phase 1)
     redis_client = redis_lib.Redis(
         host=config.redis.host,
         port=config.redis.port,
@@ -38,12 +48,19 @@ def _build_server() -> Server:
         domain_per_day=config.rate_limits.domain_per_day,
     )
 
+    # Initialize temporal DB and tool handlers (Phase 2)
+    temporal_db = TemporalDB()
+    temporal_db.connect()
+    temporal_db.create_tables()
+    temporal_handlers = TemporalToolHandlers(config, temporal_db)
+
     server = Server("parousia-guard-mcp")
 
-    # Register list_tools handler
+    # ── Phase 1 + Phase 2 tool listing ───────────────
+
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
-        return [
+        tools = [
             Tool(
                 name="send_email",
                 description=(
@@ -53,94 +70,90 @@ def _build_server() -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "to": {
-                            "type": "string",
-                            "description": "Recipient email address",
-                        },
-                        "subject": {
-                            "type": "string",
-                            "description": "Email subject line",
-                        },
-                        "body": {
-                            "type": "string",
-                            "description": "Plain-text email body",
-                        },
-                        "reply_to": {
-                            "type": "string",
-                            "description": "Optional Reply-To address",
-                        },
+                        "to": {"type": "string", "description": "Recipient email address"},
+                        "subject": {"type": "string", "description": "Email subject line"},
+                        "body": {"type": "string", "description": "Plain-text email body"},
+                        "reply_to": {"type": "string", "description": "Optional Reply-To address"},
                     },
                     "required": ["to", "subject", "body"],
                 },
             )
         ]
+        # Add temporal tools (Phase 2)
+        for schema in ALL_TEMPORAL_SCHEMAS:
+            tools.append(Tool(**schema))
+        return tools
 
-    # Register call_tool handler
+    # ── Tool dispatch ────────────────────────────────
+
     @server.call_tool()
     async def handle_call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[TextContent]:
-        if name != "send_email":
-            raise ValueError(f"Unknown tool: {name}")
+        # ── Phase 1: send_email ────────────────────
+        if name == "send_email":
+            return await _handle_send_email(arguments, config, rate_limiter)
 
-        to = arguments["to"]
-        subject = arguments["subject"]
-        body = arguments["body"]
-        reply_to = arguments.get("reply_to")
+        # ── Phase 2: temporal tools ────────────────
+        agent_id = _resolve_agent_id(config, arguments)
+        result = temporal_handlers.dispatch(name, arguments, agent_id)
+        return [TextContent(type="text", text=result)]
 
-        # Determine agent ID (first configured agent in Phase 1)
-        agent_ids = list(config.agents.keys())
-        agent_id = agent_ids[0] if agent_ids else "default"
+    return server
 
-        # Rate limit check
-        allowed, remaining, reset_seconds = rate_limiter.check(agent_id)
-        if not allowed:
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "sent": False,
-                    "error": "rate_limit_exceeded",
-                    "rate_limit_remaining": remaining,
-                    "rate_limit_reset_seconds": reset_seconds,
-                }),
-            )]
 
-        # Send via SMTP
-        from_addr = f"{agent_id}@{config.domain}"
-        try:
-            message_id = _smtp_send(
-                to=to,
-                subject=subject,
-                body=body,
-                from_addr=from_addr,
-                reply_to=reply_to,
-            )
-        except Exception as e:
-            logger.error("SMTP send failed", extra={"error": str(e)})
-            return [TextContent(
-                type="text",
-                text=json.dumps({
-                    "sent": False,
-                    "error": str(e),
-                }),
-            )]
+async def _handle_send_email(
+    arguments: dict, config, rate_limiter: RateLimiter
+) -> list[TextContent]:
+    """Handle send_email tool call (Phase 1)."""
+    to = arguments["to"]
+    subject = arguments["subject"]
+    body = arguments["body"]
+    reply_to = arguments.get("reply_to")
 
-        logger.info(
-            "email sent",
-            extra={"agent_id": agent_id, "to": to, "message_id": message_id},
-        )
+    agent_ids = list(config.agents.keys())
+    agent_id = agent_ids[0] if agent_ids else "default"
 
+    # Rate limit check
+    allowed, remaining, reset_seconds = rate_limiter.check(agent_id)
+    if not allowed:
         return [TextContent(
             type="text",
             text=json.dumps({
-                "sent": True,
-                "message_id": message_id,
+                "sent": False,
+                "error": "rate_limit_exceeded",
                 "rate_limit_remaining": remaining,
                 "rate_limit_reset_seconds": reset_seconds,
             }),
         )]
 
-    return server
+    from_addr = f"{agent_id}@{config.domain}"
+    try:
+        message_id = _smtp_send(
+            to=to, subject=subject, body=body,
+            from_addr=from_addr, reply_to=reply_to,
+        )
+    except Exception as e:
+        logger.error("SMTP send failed", extra={"error": str(e)})
+        return [TextContent(
+            type="text",
+            text=json.dumps({"sent": False, "error": str(e)}),
+        )]
+
+    logger.info(
+        "email sent",
+        extra={"agent_id": agent_id, "to": to, "message_id": message_id},
+    )
+
+    return [TextContent(
+        type="text",
+        text=json.dumps({
+            "sent": True,
+            "message_id": message_id,
+            "rate_limit_remaining": remaining,
+            "rate_limit_reset_seconds": reset_seconds,
+        }),
+    )]
 
 
 async def run_mcp_server():
@@ -149,9 +162,7 @@ async def run_mcp_server():
     async with stdio_server() as (read_stream, write_stream):
         logger.info("MCP server running on stdio transport")
         await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
+            read_stream, write_stream, server.create_initialization_options(),
         )
 
 

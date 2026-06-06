@@ -333,3 +333,8 @@ def serve(mode_rest, mode_mcp, mode_all):
 
 if __name__ == "__main__":
     cli()
+
+
+# ── Temporal group (Phase 2) ─────────────────────────────────────────
+from parousia.cli.temporal import temporal_group
+cli.add_command(temporal_group)

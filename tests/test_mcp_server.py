@@ -11,6 +11,15 @@ from parousia.guard.mcp_server import _build_server
 from parousia.guard.rate_limiter import RateLimiter
 
 
+def _fake_temporal_db():
+    """Create a mock TemporalDB that connects to :memory:."""
+    from parousia.temporal.db import TemporalDB
+    db = TemporalDB(db_path=":memory:")
+    db.connect()
+    db.create_tables()
+    return db
+
+
 # ── Email sender ──
 
 
@@ -78,6 +87,7 @@ def test_mcp_server_builds_without_error(mock_config, mock_redis, monkeypatch):
     """Server constructs without exceptions."""
     monkeypatch.setattr("parousia.guard.mcp_server.load_config", lambda: mock_config)
     monkeypatch.setattr("parousia.guard.mcp_server.redis_lib.Redis", lambda **kw: mock_redis)
+    monkeypatch.setattr("parousia.guard.mcp_server.TemporalDB", lambda **kw: _fake_temporal_db())
 
     server = _build_server()
     assert server.name == "parousia-guard-mcp"
@@ -87,6 +97,7 @@ def test_send_email_tool_schema_has_required_fields(mock_config, mock_redis, mon
     """Tool inputSchema specifies required fields."""
     monkeypatch.setattr("parousia.guard.mcp_server.load_config", lambda: mock_config)
     monkeypatch.setattr("parousia.guard.mcp_server.redis_lib.Redis", lambda **kw: mock_redis)
+    monkeypatch.setattr("parousia.guard.mcp_server.TemporalDB", lambda **kw: _fake_temporal_db())
 
     server = _build_server()
     # The list_tools handler is registered; verify server is functional
