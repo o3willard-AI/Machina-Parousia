@@ -16,11 +16,18 @@ def test_setup_no_flags_prints_usage():
     assert "Usage:" in result.output
 
 
-def test_setup_dkim_placeholder():
+@mock.patch("parousia.config.load_config")
+@mock.patch("os.makedirs")
+@mock.patch("os.chmod")
+@mock.patch("builtins.open", new_callable=mock.mock_open)
+def test_setup_dkim_placeholder(mock_file, mock_chmod, mock_makedirs, mock_config):
+    """setup --dkim generates DKIM keys and prints DNS records."""
+    from parousia.config import ParousiaConfig
+    mock_config.return_value = ParousiaConfig(domain="example.com")
     runner = CliRunner()
     result = runner.invoke(cli, ["setup", "--dkim"])
     assert result.exit_code == 0
-    assert "Story 6" in result.output
+    assert "v=DKIM1" in result.output
 
 
 @mock.patch("builtins.open", new_callable=mock.mock_open)

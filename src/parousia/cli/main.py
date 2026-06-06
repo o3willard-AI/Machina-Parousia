@@ -22,7 +22,29 @@ def cli():
 def setup(postfix, dkim):
     """Configure Parousia components: Postfix aliases or DKIM keys."""
     if dkim:
-        click.echo("DKIM setup not yet implemented — Story 6")
+        import os
+        from parousia.cli.dkim import generate_dkim_keys
+        from parousia.cli.dns_records import format_dns_records
+        from parousia.config import load_config
+
+        config = load_config()
+        click.echo(f"Generating DKIM keys for {config.domain}...")
+
+        public_pem = generate_dkim_keys(
+            config.domain, config.dkim.key_dir, config.dkim.selector
+        )
+        if public_pem is None:
+            key_path = os.path.join(config.dkim.key_dir, f"{config.domain}.key")
+            click.secho(
+                f"⚠ Key already exists: {key_path}\n"
+                f"  Use --rotate to rotate keys or delete the existing key.",
+                fg="yellow",
+            )
+            return
+
+        records = format_dns_records(config.domain, config.dkim.selector, public_pem)
+        click.secho("✓ DKIM keypair generated", fg="green")
+        click.echo(records)
         return
 
     if not postfix:
