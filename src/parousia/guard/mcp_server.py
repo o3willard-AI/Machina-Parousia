@@ -74,6 +74,7 @@ def _build_server() -> Server:
                         "subject": {"type": "string", "description": "Email subject line"},
                         "body": {"type": "string", "description": "Plain-text email body"},
                         "reply_to": {"type": "string", "description": "Optional Reply-To address"},
+                        "from_agent": {"type": "string", "description": "Optional agent ID to send from (defaults to first configured agent)"},
                     },
                     "required": ["to", "subject", "body"],
                 },
@@ -111,8 +112,22 @@ async def _handle_send_email(
     body = arguments["body"]
     reply_to = arguments.get("reply_to")
 
-    agent_ids = list(config.agents.keys())
-    agent_id = agent_ids[0] if agent_ids else "default"
+    # Resolve agent — use from_agent param, then fallback to first configured
+    agent_id = arguments.get("from_agent")
+    if not agent_id:
+        agent_ids = list(config.agents.keys())
+        agent_id = agent_ids[0] if agent_ids else "default"
+
+    # Validate agent exists
+    if agent_id != "default" and agent_id not in config.agents:
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "sent": False,
+                "error": f"Unknown agent: {agent_id}",
+                "available_agents": list(config.agents.keys()),
+            }),
+        )]
 
     # Rate limit check
     allowed, remaining, reset_seconds = rate_limiter.check(agent_id)
