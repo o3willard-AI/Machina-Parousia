@@ -93,7 +93,7 @@ def _build_server() -> Server:
     ) -> list[TextContent]:
         # ── Phase 1: send_email ────────────────────
         if name == "send_email":
-            return await _handle_send_email(arguments, config, rate_limiter)
+            return await _handle_send_email(arguments, config, rate_limiter, redis_client)
 
         # ── Phase 2: temporal tools ────────────────
         agent_id = _resolve_agent_id(config, arguments)
@@ -104,7 +104,7 @@ def _build_server() -> Server:
 
 
 async def _handle_send_email(
-    arguments: dict, config, rate_limiter: RateLimiter
+    arguments: dict, config, rate_limiter: RateLimiter, redis_client
 ) -> list[TextContent]:
     """Handle send_email tool call (Phase 1)."""
     to = arguments["to"]
@@ -139,6 +139,30 @@ async def _handle_send_email(
                 "error": "rate_limit_exceeded",
                 "rate_limit_remaining": remaining,
                 "rate_limit_reset_seconds": reset_seconds,
+            }),
+        )]
+
+    # Human-in-the-loop approval check
+    if config.approval.enabled and agent_id in config.approval.require_approval_for:
+        from parousia.guard.approval_queue import ApprovalQueue
+        from_addr = f"{agent_id}@{config.domain}"
+        aq = ApprovalQueue(redis_client)
+        approval_id = aq.enqueue(
+            agent_id=agent_id,
+            to=to,
+            subject=subject,
+            body=body,
+            from_addr=from_addr,
+            reply_to=reply_to,
+            ttl_hours=config.approval.queue_ttl_hours,
+        )
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "sent": False,
+                "queued_for_approval": True,
+                "approval_id": approval_id,
+                "message": "Email held for human review. It will be sent upon approval.",
             }),
         )]
 

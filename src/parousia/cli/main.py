@@ -338,3 +338,7 @@ if __name__ == "__main__":
 # ── Temporal group (Phase 2) ─────────────────────────────────────────
 from parousia.cli.temporal import temporal_group
 cli.add_command(temporal_group)
+
+# ── Approval group (Phase 1 backlog Item 3) ──────────────────────────
+from parousia.cli.approval import approval_group
+cli.add_command(approval_group)

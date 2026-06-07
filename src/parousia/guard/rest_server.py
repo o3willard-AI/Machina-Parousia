@@ -148,3 +148,68 @@ async def _forward_to_agent(
             await asyncio.sleep(2 ** attempt)  # exponential backoff: 2s, 4s, 8s
 
     logger.error("webhook exhausted retries", extra={"task_id": task_id})
+
+
+# ── Approval endpoints ──────────────────────────
+
+@app.get("/approval/pending")
+async def list_pending():
+    """List all emails pending human approval."""
+    config = load_config()
+    import redis as redis_lib
+    from parousia.guard.approval_queue import ApprovalQueue
+
+    r = redis_lib.Redis(
+        host=config.redis.host, port=config.redis.port,
+        db=config.redis.db, socket_connect_timeout=2,
+    )
+    q = ApprovalQueue(r)
+    return JSONResponse({"pending": q.list_pending()})
+
+
+@app.post("/approval/{approval_id}/approve")
+async def approve_email(approval_id: str):
+    """Approve a pending email and send it."""
+    config = load_config()
+    import redis as redis_lib
+    from parousia.guard.approval_queue import ApprovalQueue
+    from parousia.guard.email_sender import send_email as _smtp_send
+
+    r = redis_lib.Redis(
+        host=config.redis.host, port=config.redis.port,
+        db=config.redis.db, socket_connect_timeout=2,
+    )
+    q = ApprovalQueue(r)
+    item = q.approve(approval_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found or already processed")
+
+    try:
+        msg_id = _smtp_send(
+            to=item["to"], subject=item["subject"], body=item["body"],
+            from_addr=item["from_addr"], reply_to=item.get("reply_to"),
+        )
+        return JSONResponse({"sent": True, "message_id": msg_id, "approval_id": approval_id})
+    except Exception as e:
+        return JSONResponse(
+            {"sent": False, "error": str(e), "approval_id": approval_id},
+            status_code=500,
+        )
+
+
+@app.post("/approval/{approval_id}/reject")
+async def reject_email(approval_id: str, reason: str = ""):
+    """Reject a pending email."""
+    config = load_config()
+    import redis as redis_lib
+    from parousia.guard.approval_queue import ApprovalQueue
+
+    r = redis_lib.Redis(
+        host=config.redis.host, port=config.redis.port,
+        db=config.redis.db, socket_connect_timeout=2,
+    )
+    q = ApprovalQueue(r)
+    item = q.reject(approval_id, reason)
+    if not item:
+        raise HTTPException(status_code=404, detail="Not found or already processed")
+    return JSONResponse({"rejected": True, "approval_id": approval_id})

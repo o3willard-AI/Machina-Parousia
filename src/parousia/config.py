@@ -50,6 +50,12 @@ class LoggingConfig(BaseModel):
     output: str = "syslog"
 
 
+class ApprovalConfig(BaseModel):
+    enabled: bool = False
+    queue_ttl_hours: int = 72
+    require_approval_for: list[str] = Field(default_factory=list)
+
+
 class ParousiaConfig(BaseModel):
     domain: str = "agents.yourdomain.com"
     hostname: str = "mx.agents.yourdomain.com"
@@ -60,6 +66,7 @@ class ParousiaConfig(BaseModel):
     dkim: DkimConfig = Field(default_factory=DkimConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
 
 
 def _find_config() -> Optional[Path]:
