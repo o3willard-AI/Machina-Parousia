@@ -1,0 +1,22 @@
+# Tier 2 rate limiting — SMTP-level before guard
+# postfwd rules file v2
+
+# Per-sender rate limit: max 30 emails per hour from any single sender
+id=RATE_SENDER_PER_HOUR
+    sender=~/.*/
+    action=rate(sender/30/3600/450 4.7.1 Throttled — too many emails from sender, try again later)
+
+# Per-recipient rate limit: max 60 emails per hour to any single agent
+id=RATE_RECIPIENT_PER_HOUR
+    recipient=~/.*@agents\..*/
+    action=rate(recipient/60/3600/450 4.7.1 Throttled — agent receiving too many emails, try again later)
+
+# Global rate limit: max 300 connections per hour from any IP
+id=RATE_CLIENT_PER_HOUR
+    client_address=~/.*/
+    action=rate(client_address/300/3600/450 4.7.1 Throttled — server busy, try again later)
+
+# Reject if HELO is not an FQDN (basic spam check)
+id=HELO_FQDN_CHECK
+    helo_name=~/[^.]/
+    action=451 Please use a fully qualified domain name in HELO

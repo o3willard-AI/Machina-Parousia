@@ -19,8 +19,14 @@ def cli():
 @cli.command()
 @click.option("--postfix", is_flag=True, help="Configure Postfix aliases for pipe-to-agent delivery.")
 @click.option("--dkim", is_flag=True, help="Generate DKIM keys and DNS records (Story 6).")
+@click.option("--tls", is_flag=True, help="Set up TLS certificates for Postfix via Let's Encrypt.")
+@click.option("--postfwd", is_flag=True, help="Configure postfwd Tier 2 SMTP rate limiting.")
 @click.option("--config", "gen_config", is_flag=True, help="Generate /etc/parousia/config.yaml with defaults.")
-def setup(postfix, dkim, gen_config):
+@click.option("--domain", default=None, help="Domain for TLS certificate.")
+@click.option("--email", default=None, help="Email for Let's Encrypt notifications (for --tls).")
+@click.option("--staging", is_flag=True, help="Use Let's Encrypt staging (for --tls).")
+@click.option("--dry-run", is_flag=True, help="Preview changes without applying (for --tls).")
+def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_run):
     """Configure Parousia components: Postfix aliases or DKIM keys."""
     if gen_config:
         import os
@@ -89,11 +95,32 @@ def setup(postfix, dkim, gen_config):
         click.echo(records)
         return
 
-    if not postfix:
-        click.echo("Usage: parousia-guard setup [--postfix | --dkim | --config]")
+    if not postfix and not tls and not postfwd:
+        click.echo("Usage: parousia-guard setup [--postfix | --dkim | --tls | --postfwd | --config]")
         click.echo("  --postfix    Configure Postfix aliases for pipe-to-agent delivery")
         click.echo("  --dkim       Generate DKIM keys and DNS records")
+        click.echo("  --tls        Set up TLS certificates via Let's Encrypt")
+        click.echo("  --postfwd    Set up postfwd Tier 2 SMTP rate limiting")
         click.echo("  --config     Generate config file with defaults")
+        return
+
+    # ── TLS setup ───────────────────────────────────────────────
+    if tls:
+        from parousia.cli.tls import setup_tls
+        setup_tls(domain=domain, email=email, staging=staging, dry_run=dry_run)
+        return
+
+    # ── postfwd setup ───────────────────────────────────────────
+    if postfwd:
+        from pathlib import Path
+        import subprocess as _sub
+        script = Path(__file__).parent.parent.parent.parent / "scripts" / "postfwd-setup.sh"
+        if script.exists():
+            click.echo("Configuring postfwd Tier 2 rate limiting...")
+            _sub.run(["sudo", "bash", str(script)], check=True)
+            click.secho("✓ postfwd configured", fg="green")
+        else:
+            click.secho(f"✗ postfwd-setup.sh not found at {script}", fg="red")
         return
 
     # ── Postfix alias setup ──────────────────────────────────────
