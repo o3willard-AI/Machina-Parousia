@@ -88,6 +88,17 @@ def main():
         "agent_id": agent_id,
         "raw_mime": raw_email,
     }
+
+    # Verify DKIM signature on inbound mail
+    dkim_ok, dkim_details = False, "not checked"
+    if raw_email.strip():
+        try:
+            from parousia.guard.dkim_validator import verify_dkim
+            dkim_ok, dkim_details = verify_dkim(raw_email.encode("utf-8", errors="replace"))
+        except Exception:
+            dkim_details = "DKIM verification skipped"
+    payload["dkim_verified"] = dkim_ok
+    payload["dkim_details"] = dkim_details
     if calendar_events is not None:
         payload["calendar_events"] = calendar_events
     if calendar_errors is not None:

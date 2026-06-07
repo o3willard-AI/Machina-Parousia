@@ -20,6 +20,8 @@ dependencies = [
     "PyYAML>=6.0",
     "icalendar>=5.0",
     "python-dateutil>=2.8",
+    "dkimpy>=1.1.0",
+    "cryptography>=41.0",
 ]
 
 [project.optional-dependencies]
