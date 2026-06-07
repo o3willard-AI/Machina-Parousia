@@ -213,3 +213,61 @@ async def reject_email(approval_id: str, reason: str = ""):
     if not item:
         raise HTTPException(status_code=404, detail="Not found or already processed")
     return JSONResponse({"rejected": True, "approval_id": approval_id})
+
+
+# ── Monitoring endpoints ───────────────────────
+
+@app.get("/metrics")
+async def metrics():
+    """Return health metrics as JSON."""
+    config = load_config()
+    import redis as redis_lib
+    from parousia.monitoring.dashboard import collect_metrics
+
+    r = redis_lib.Redis(
+        host=config.redis.host, port=config.redis.port,
+        db=config.redis.db, socket_connect_timeout=2,
+    )
+    return JSONResponse(collect_metrics(config, r))
+
+
+@app.get("/dashboard")
+async def dashboard():
+    """Serve the monitoring dashboard HTML page."""
+    from fastapi.responses import HTMLResponse
+
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parousia — Monitoring</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui; background: #111; color: #eee; margin: 2rem; }
+  .card { background: #1a1a1a; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; border: 1px solid #333; }
+  .ok { color: #4ade80; } .warn { color: #fbbf24; } .error { color: #f87171; }
+  h1 { margin-top: 0; }
+  pre { white-space: pre-wrap; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<h1>Parousia Monitoring</h1>
+<p>Auto-refreshing every 5 seconds via <a href="/metrics" style="color:#60a5fa;">/metrics</a></p>
+<pre id="data">Loading...</pre>
+<script>
+async function refresh() {
+  try {
+    const r = await fetch('/metrics');
+    const d = await r.json();
+    document.getElementById('data').textContent = JSON.stringify(d, null, 2);
+  } catch(e) {
+    document.getElementById('data').textContent = 'Error: ' + e.message;
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>"""
+    return HTMLResponse(html)

@@ -342,3 +342,7 @@ cli.add_command(temporal_group)
 # ── Approval group (Phase 1 backlog Item 3) ──────────────────────────
 from parousia.cli.approval import approval_group
 cli.add_command(approval_group)
+
+# ── Monitor command (Phase 1 backlog Item 7) ─────────────────────────
+from parousia.cli.monitor import monitor
+cli.add_command(monitor)
