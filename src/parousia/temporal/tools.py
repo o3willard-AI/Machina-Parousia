@@ -49,7 +49,8 @@ def schedule_event_schema() -> dict:
         "name": "schedule_event",
         "description": (
             "Schedule a new calendar event. Returns .ics, Google Calendar API, "
-            "and MS Graph API payloads for external sync. Detects time conflicts."
+            "and MS Graph API payloads for external sync. When auto_resolve=True "
+            "(default), automatically resolves time conflicts by moving flexible events."
         ),
         "inputSchema": {
             "type": "object",
@@ -58,6 +59,7 @@ def schedule_event_schema() -> dict:
                 "start_time": {"type": "string", "description": "ISO 8601 start datetime"},
                 "end_time": {"type": "string", "description": "ISO 8601 end datetime (default: start + 1h)"},
                 "flexibility": {"type": "string", "enum": ["high", "low", "none"], "description": "How movable this event is. Default: 'high'."},
+                "auto_resolve": {"type": "boolean", "description": "Automatically resolve time conflicts by moving flexible events. Default: true."},
                 "stakeholders": {"type": "string", "description": "Comma-separated stakeholder list"},
                 "metadata": {"type": "object", "description": "Arbitrary key-value metadata"},
             },
@@ -117,12 +119,33 @@ def nominate_milestone_schema() -> dict:
     }
 
 
+def resolve_conflicts_schema() -> dict:
+    return {
+        "name": "resolve_conflicts",
+        "description": (
+            "Detect and auto-resolve scheduling conflicts. Moves flexible events "
+            "to avoid overlaps — never moves flexibility='none' events. "
+            "Use this before planning to ensure a clean calendar."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent ID. Auto-detected from session if omitted.",
+                },
+            },
+        },
+    }
+
+
 ALL_TEMPORAL_SCHEMAS = [
     get_temporal_context_schema(),
     schedule_event_schema(),
     cancel_event_schema(),
     set_timer_alarm_schema(),
     nominate_milestone_schema(),
+    resolve_conflicts_schema(),
 ]
 
 
@@ -145,6 +168,7 @@ class TemporalToolHandlers:
             "cancel_event": self._handle_cancel_event,
             "set_timer_alarm": self._handle_set_timer_alarm,
             "nominate_milestone": self._handle_nominate_milestone,
+            "resolve_conflicts": self._handle_resolve_conflicts,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -211,12 +235,21 @@ class TemporalToolHandlers:
         # Check conflicts
         conflicts = self.serializer.get_conflicts(agent_id)
 
-        return {
+        # Auto-resolve if requested (default: True)
+        resolution = None
+        auto_resolve = args.get("auto_resolve", True)
+        if auto_resolve and conflicts:
+            resolution = self.serializer.resolve_conflicts(agent_id)
+
+        result = {
             "scheduled": True,
             "event_id": event_id.split(":", 1)[1] if ":" in event_id else event_id,
             "title": title,
             "conflicts": conflicts,
         }
+        if resolution:
+            result["resolution"] = resolution
+        return result
 
     # ── cancel_event ───────────────────────────────────
 
@@ -312,3 +345,9 @@ class TemporalToolHandlers:
             "journal_id": journal_id.split(":", 1)[1] if ":" in journal_id else journal_id,
             "title": args["title"],
         }
+
+    # ── resolve_conflicts ───────────────────────────────
+
+    def _handle_resolve_conflicts(self, args: dict, agent_id: str) -> dict:
+        resolution = self.serializer.resolve_conflicts(agent_id)
+        return resolution

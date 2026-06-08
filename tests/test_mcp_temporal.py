@@ -16,13 +16,14 @@ from parousia.temporal.tools import (
 class TestTemporalToolSchemas:
     """Verify all 5 temporal tool schemas are present and valid."""
 
-    def test_all_five_schemas_present(self):
+    def test_all_six_schemas_present(self):
         names = [s["name"] for s in ALL_TEMPORAL_SCHEMAS]
         assert "get_temporal_context" in names
         assert "schedule_event" in names
         assert "cancel_event" in names
         assert "set_timer_alarm" in names
         assert "nominate_milestone" in names
+        assert "resolve_conflicts" in names
 
     def test_get_temporal_context_schema(self):
         schema = next(s for s in ALL_TEMPORAL_SCHEMAS if s["name"] == "get_temporal_context")
@@ -218,3 +219,223 @@ class TestTemporalToolHandlers:
     def test_unknown_tool_returns_error(self, handlers, agent_id):
         result = json.loads(handlers.dispatch("nonexistent_tool", {}, agent_id))
         assert "error" in result
+
+
+class TestConflictAutoResolution:
+    """Test the conflict auto-resolution logic in schedule_event and resolve_conflicts."""
+
+    @pytest.fixture
+    def config(self):
+        return ParousiaConfig(domain="test.example.com")
+
+    @pytest.fixture
+    def db(self):
+        db = TemporalDB(db_path=":memory:")
+        db.connect()
+        db.create_tables()
+        yield db
+        db.close()
+
+    @pytest.fixture
+    def handlers(self, config, db):
+        return TemporalToolHandlers(config, db)
+
+    @pytest.fixture
+    def agent_id(self):
+        return "hermes"
+
+    # ── Basic auto_resolve in schedule_event ────────────
+
+    def test_auto_resolve_moves_high_flex_event(self, handlers, db, agent_id):
+        """Event B (high flex) overlaps with Event A (none flex) — B should move."""
+        # Insert a fixed event
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Fixed Meeting",
+            "start_time": "2026-06-15T10:00:00",
+            "end_time": "2026-06-15T12:00:00",
+            "flexibility": "none",
+        })
+        # Schedule an overlapping event (auto_resolve=True by default)
+        result = json.loads(handlers.dispatch("schedule_event", {
+            "title": "Flexible Chat",
+            "start_time": "2026-06-15T11:00:00",
+            "end_time": "2026-06-15T13:00:00",
+            "flexibility": "high",
+        }, agent_id))
+        assert result["scheduled"] is True
+        assert "resolution" in result
+        assert len(result["resolution"]["resolved"]) == 1
+        moved = result["resolution"]["resolved"][0]
+        assert moved["moved_title"] == "Flexible Chat"
+        assert moved["moved_event_id"] == "e2"
+        # Moved event should start after Fixed Meeting ends (12:00)
+        assert "12:00:00" in moved["new_start"] or moved["new_start"] >= "2026-06-15T12:00:00"
+
+    def test_auto_resolve_moves_low_for_none(self, handlers, db, agent_id):
+        """A 'low' flex event gives way to a 'none' flex event."""
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Immovable",
+            "start_time": "2026-06-15T09:00:00",
+            "end_time": "2026-06-15T10:30:00",
+            "flexibility": "none",
+        })
+        result = json.loads(handlers.dispatch("schedule_event", {
+            "title": "Low Priority",
+            "start_time": "2026-06-15T09:30:00",
+            "flexibility": "low",
+        }, agent_id))
+        assert result["scheduled"] is True
+        assert "resolution" in result
+        assert len(result["resolution"]["resolved"]) == 1
+        assert result["resolution"]["resolved"][0]["moved_title"] == "Low Priority"
+
+    def test_auto_resolve_high_gives_way_to_low(self, handlers, db, agent_id):
+        """A 'high' flex event gives way to a 'low' flex event."""
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Low Flex",
+            "start_time": "2026-06-15T14:00:00",
+            "end_time": "2026-06-15T15:00:00",
+            "flexibility": "low",
+        })
+        result = json.loads(handlers.dispatch("schedule_event", {
+            "title": "High Flex",
+            "start_time": "2026-06-15T14:30:00",
+            "flexibility": "high",
+        }, agent_id))
+        assert result["scheduled"] is True
+        assert len(result["resolution"]["resolved"]) == 1
+        assert result["resolution"]["resolved"][0]["moved_title"] == "High Flex"
+
+    def test_auto_resolve_equal_flex_moves_shorter(self, handlers, db, agent_id):
+        """Two 'high' flex events — the shorter one moves."""
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Long Event",
+            "start_time": "2026-06-15T16:00:00",
+            "end_time": "2026-06-15T18:00:00",
+            "flexibility": "high",
+        })
+        result = json.loads(handlers.dispatch("schedule_event", {
+            "title": "Short Event",
+            "start_time": "2026-06-15T17:00:00",
+            "end_time": "2026-06-15T17:30:00",
+            "flexibility": "high",
+        }, agent_id))
+        assert result["scheduled"] is True
+        assert len(result["resolution"]["resolved"]) == 1
+        assert result["resolution"]["resolved"][0]["moved_title"] == "Short Event"
+
+    def test_auto_resolve_none_vs_none_is_unresolved(self, handlers, db, agent_id):
+        """Two 'none' flex events — can't resolve automatically."""
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Board Meeting",
+            "start_time": "2026-06-15T10:00:00",
+            "end_time": "2026-06-15T12:00:00",
+            "flexibility": "none",
+        })
+        result = json.loads(handlers.dispatch("schedule_event", {
+            "title": "Shareholder Call",
+            "start_time": "2026-06-15T11:00:00",
+            "flexibility": "none",
+        }, agent_id))
+        assert result["scheduled"] is True
+        assert len(result["resolution"]["unresolved"]) == 1
+        assert len(result["resolution"]["resolved"]) == 0
+
+    def test_auto_resolve_disabled_with_flag(self, handlers, db, agent_id):
+        """auto_resolve=False should detect conflicts but not move anything."""
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Fixed",
+            "start_time": "2026-06-15T10:00:00",
+            "end_time": "2026-06-15T12:00:00",
+            "flexibility": "none",
+        })
+        result = json.loads(handlers.dispatch("schedule_event", {
+            "title": "Overlap",
+            "start_time": "2026-06-15T11:00:00",
+            "flexibility": "high",
+            "auto_resolve": False,
+        }, agent_id))
+        assert result["scheduled"] is True
+        assert len(result["conflicts"]) == 1
+        assert "resolution" not in result
+
+    # ── resolve_conflicts standalone tool ───────────────
+
+    def test_resolve_conflicts_tool_no_conflicts(self, handlers, db, agent_id):
+        """Calling resolve_conflicts on a clean calendar does nothing."""
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "Solo",
+            "start_time": "2026-06-15T10:00:00",
+        })
+        result = json.loads(handlers.dispatch("resolve_conflicts", {}, agent_id))
+        assert len(result["resolved"]) == 0
+        assert len(result["unresolved"]) == 0
+
+    def test_resolve_conflicts_tool_batch(self, handlers, db, agent_id):
+        """resolve_conflicts resolves multiple pairs at once."""
+        # Three events that all overlap in a chain
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "E1",
+            "start_time": "2026-06-15T10:00:00",
+            "end_time": "2026-06-15T12:00:00",
+            "flexibility": "none",
+        })
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "E2",
+            "start_time": "2026-06-15T11:00:00",
+            "end_time": "2026-06-15T11:30:00",
+            "flexibility": "high",
+        })
+        db.insert_event({
+            "agent_id": agent_id,
+            "title": "E3",
+            "start_time": "2026-06-15T11:15:00",
+            "end_time": "2026-06-15T12:30:00",
+            "flexibility": "high",
+        })
+        result = json.loads(handlers.dispatch("resolve_conflicts", {}, agent_id))
+        assert len(result["resolved"]) >= 2  # E2 and E3 should both move
+        moved_titles = [r["moved_title"] for r in result["resolved"]]
+        assert "E2" in moved_titles
+        assert "E3" in moved_titles
+        assert "E1" not in moved_titles
+
+    # ── Agent isolation ─────────────────────────────────
+
+    def test_resolve_conflicts_respects_agent_isolation(self, handlers, db):
+        """Conflicts for hermes don't affect claude's events."""
+        # Create conflicting events for hermes
+        db.insert_event({
+            "agent_id": "hermes",
+            "title": "H Fixed",
+            "start_time": "2026-06-15T10:00:00",
+            "end_time": "2026-06-15T12:00:00",
+            "flexibility": "none",
+        })
+        db.insert_event({
+            "agent_id": "hermes",
+            "title": "H Flex",
+            "start_time": "2026-06-15T11:00:00",
+            "flexibility": "high",
+        })
+        # Create non-conflicting events for claude
+        db.insert_event({
+            "agent_id": "claude",
+            "title": "C Solo",
+            "start_time": "2026-06-15T14:00:00",
+        })
+        result = json.loads(handlers.dispatch("resolve_conflicts", {}, "hermes"))
+        assert len(result["resolved"]) == 1
+        assert result["resolved"][0]["moved_title"] == "H Flex"
+        # Claude's events untouched
+        claude_result = json.loads(handlers.dispatch("resolve_conflicts", {}, "claude"))
+        assert len(claude_result["resolved"]) == 0
