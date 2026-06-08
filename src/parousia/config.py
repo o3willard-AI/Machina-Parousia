@@ -56,6 +56,23 @@ class ApprovalConfig(BaseModel):
     require_approval_for: list[str] = Field(default_factory=list)
 
 
+class Crawl4aiConfig(BaseModel):
+    word_count_threshold: int = 200
+    exclude_tags: list[str] = Field(default_factory=list)
+    exclude_selectors: list[str] = Field(default_factory=list)
+    timeout_ms: int = 15000
+
+
+class SpatialConfig(BaseModel):
+    enabled: bool = True
+    chromium_path: str = "/usr/bin/chromium-browser"
+    profile_dir: str = "/var/lib/parousia/browsers"
+    idle_timeout_seconds: int = 300
+    max_instances: int = 10
+    launch_args: list[str] = Field(default_factory=list)
+    crawl4ai: Crawl4aiConfig = Field(default_factory=Crawl4aiConfig)
+
+
 class ParousiaConfig(BaseModel):
     domain: str = "agents.yourdomain.com"
     hostname: str = "mx.agents.yourdomain.com"
@@ -67,6 +84,7 @@ class ParousiaConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
+    spatial: SpatialConfig = Field(default_factory=SpatialConfig)
 
 
 def _find_config() -> Optional[Path]:

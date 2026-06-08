@@ -17,6 +17,9 @@ from mcp.types import TextContent, Tool
 from parousia.config import load_config
 from parousia.guard.email_sender import send_email as _smtp_send
 from parousia.guard.rate_limiter import RateLimiter
+from parousia.spatial.browser_pool import BrowserPoolManager
+from parousia.spatial.serializer import SpatialSerializer
+from parousia.spatial.tools import ALL_SPATIAL_SCHEMAS, SpatialToolHandlers
 from parousia.temporal.db import TemporalDB
 from parousia.temporal.tools import ALL_TEMPORAL_SCHEMAS, TemporalToolHandlers
 
@@ -54,6 +57,11 @@ def _build_server() -> Server:
     temporal_db.create_tables()
     temporal_handlers = TemporalToolHandlers(config, temporal_db)
 
+    # Initialize spatial browser pool and tool handlers (Phase 3)
+    browser_pool = BrowserPoolManager(config.spatial)
+    spatial_serializer = SpatialSerializer()
+    spatial_handlers = SpatialToolHandlers(config, browser_pool, spatial_serializer)
+
     server = Server("parousia-guard-mcp")
 
     # ── Phase 1 + Phase 2 tool listing ───────────────
@@ -83,6 +91,9 @@ def _build_server() -> Server:
         # Add temporal tools (Phase 2)
         for schema in ALL_TEMPORAL_SCHEMAS:
             tools.append(Tool(**schema))
+        # Add spatial tools (Phase 3)
+        for schema in ALL_SPATIAL_SCHEMAS:
+            tools.append(Tool(**schema))
         return tools
 
     # ── Tool dispatch ────────────────────────────────
@@ -95,10 +106,25 @@ def _build_server() -> Server:
         if name == "send_email":
             return await _handle_send_email(arguments, config, rate_limiter, redis_client)
 
-        # ── Phase 2: temporal tools ────────────────
         agent_id = _resolve_agent_id(config, arguments)
-        result = temporal_handlers.dispatch(name, arguments, agent_id)
-        return [TextContent(type="text", text=result)]
+
+        # ── Phase 2: temporal tools ────────────────
+        temporal_names = {s["name"] for s in ALL_TEMPORAL_SCHEMAS}
+        if name in temporal_names:
+            result = temporal_handlers.dispatch(name, arguments, agent_id)
+            return [TextContent(type="text", text=result)]
+
+        # ── Phase 3: spatial tools ────────────────
+        spatial_names = {s["name"] for s in ALL_SPATIAL_SCHEMAS}
+        if name in spatial_names:
+            result = spatial_handlers.dispatch(name, arguments, agent_id)
+            return [TextContent(type="text", text=result)]
+
+        # ── Unknown tool ───────────────────────────
+        return [TextContent(
+            type="text",
+            text=json.dumps({"error": f"Unknown tool: {name}"}),
+        )]
 
     return server
 

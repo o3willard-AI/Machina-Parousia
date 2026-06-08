@@ -358,10 +358,6 @@ def serve(mode_rest, mode_mcp, mode_all):
         return  # mcp_main blocks
 
 
-if __name__ == "__main__":
-    cli()
-
-
 # ── Temporal group (Phase 2) ─────────────────────────────────────────
 from parousia.cli.temporal import temporal_group
 cli.add_command(temporal_group)
@@ -373,3 +369,11 @@ cli.add_command(approval_group)
 # ── Monitor command (Phase 1 backlog Item 7) ─────────────────────────
 from parousia.cli.monitor import monitor
 cli.add_command(monitor)
+
+# ── Spatial group (Story 19) ─────────────────────────────────────────
+from parousia.cli.spatial import spatial_group
+cli.add_command(spatial_group)
+
+
+if __name__ == "__main__":
+    cli()
