@@ -15,10 +15,32 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from parousia.config import load_config
+from parousia.auth.accounts import AccountStore
+from parousia.auth.middleware import AgentAuthMiddleware, get_account
+from parousia.auth.onboard import OnboardRequest, OnboardResponse, handle_onboard
 
 logger = logging.getLogger("parousia.rest")
 
 app = FastAPI(title="Parousia Guard — REST Ingress")
+
+# ── Account store & auth middleware ──────────────────
+
+_account_store = AccountStore()
+
+
+@app.on_event("startup")
+async def startup_accounts():
+    _account_store.connect()
+
+
+app.add_middleware(
+    AgentAuthMiddleware,
+    account_store=_account_store,
+    public_paths={
+        "/health", "/onboard", "/docs", "/openapi.json",
+        "/ingest", "/approval/pending", "/metrics", "/dashboard",
+    },
+)
 
 
 class IngestRequest(BaseModel):
@@ -271,3 +293,40 @@ setInterval(refresh, 5000);
 </body>
 </html>"""
     return HTMLResponse(html)
+
+
+# ── Onboarding & Account endpoints ──────────────────
+
+
+@app.post("/onboard", response_model=OnboardResponse)
+async def onboard(request: OnboardRequest):
+    return handle_onboard(_account_store, request)
+
+
+@app.get("/account")
+async def account_info(request: Request):
+    account = get_account(request)
+    return {
+        "account_id": account.account_id,
+        "display_name": account.display_name,
+        "tier": account.tier,
+        "status": account.status,
+        "email": account.email,
+        "email_verified": account.email_verified,
+        "rate_limit_per_hour": account.rate_limit_per_hour,
+        "browser_max_instances": account.browser_max_instances,
+        "created_at": account.created_at,
+    }
+
+
+@app.post("/account/rotate-key")
+async def rotate_key(request: Request):
+    account = get_account(request)
+    new_key = _account_store.rotate_key(account.account_id)
+    if not new_key:
+        raise HTTPException(status_code=500, detail="Key rotation failed")
+    return {
+        "account_id": account.account_id,
+        "new_api_key": new_key,
+        "message": "Key rotated! Save this new key — it will not be shown again.",
+    }
