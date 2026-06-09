@@ -37,3 +37,61 @@ def test_create_and_get(store):
     fetched = store.get_account("agent-1")
     assert fetched is not None
     assert fetched.account_id == "agent-1"
+
+
+# ── Authentication ──────────────────────────────
+
+def test_authenticate_success(store):
+    """authenticate with the correct key returns the Account."""
+    _, raw_key = store.create_account("agent-auth")
+    account = store.authenticate(raw_key)
+    assert account is not None
+    assert account.account_id == "agent-auth"
+
+
+def test_authenticate_wrong_key(store):
+    """authenticate with a bad key returns None."""
+    store.create_account("agent-auth")
+    account = store.authenticate("po_nonexistent_key_000")
+    assert account is None
+
+
+def test_authenticate_suspended(store):
+    """authenticate refuses suspended accounts."""
+    _, raw_key = store.create_account("agent-sus")
+    store.set_status("agent-sus", "suspended")
+    account = store.authenticate(raw_key)
+    assert account is None
+
+
+# ── Key rotation ───────────────────────────────
+
+def test_rotate_key_success(store):
+    """rotate_key returns a new key; old key stops working."""
+    _, old_key = store.create_account("agent-rot")
+    new_key = store.rotate_key("agent-rot")
+    assert new_key is not None
+    assert new_key != old_key
+    assert store.authenticate(old_key) is None
+    assert store.authenticate(new_key) is not None
+
+
+def test_rotate_key_nonexistent(store):
+    """rotate_key on a nonexistent account returns None."""
+    assert store.rotate_key("nobody") is None
+
+
+# ── Account lifecycle ──────────────────────────
+
+def test_account_exists(store):
+    """account_exists returns True/False correctly."""
+    assert not store.account_exists("nobody")
+    store.create_account("somebody")
+    assert store.account_exists("somebody")
+
+
+def test_create_duplicate_raises(store):
+    """create_account with a duplicate account_id raises IntegrityError."""
+    store.create_account("dupe")
+    with pytest.raises(Exception):
+        store.create_account("dupe")

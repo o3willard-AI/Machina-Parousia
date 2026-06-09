@@ -136,6 +136,57 @@ class AccountStore:
             metadata=row["metadata"],
         )
 
+    def authenticate(self, api_key: str) -> Optional[Account]:
+        """Look up an account by API key. Returns Account or None."""
+        rows = self._conn.execute(
+            "SELECT account_id, api_key_hash FROM accounts WHERE status = 'active'"
+        ).fetchall()
+        for row in rows:
+            if self.verify_key(api_key, row["api_key_hash"]):
+                return self.get_account(row["account_id"])
+        return None
+
+    def rotate_key(self, account_id: str) -> Optional[str]:
+        """Generate a new API key. Returns raw key once; old key is revoked."""
+        account = self.get_account(account_id)
+        if not account:
+            return None
+        new_key = self.generate_key()
+        new_hash = self.hash_key(new_key)
+        now = datetime.now(timezone.utc).isoformat()
+        old_hash = account.api_key_hash
+
+        self._conn.execute(
+            "UPDATE accounts SET api_key_hash = ? WHERE account_id = ?",
+            (new_hash, account_id),
+        )
+        self._conn.execute(
+            "INSERT INTO api_key_events (account_id, event_type, key_hash, created_at) "
+            "VALUES (?, 'rotated', ?, ?)",
+            (account_id, new_hash, now),
+        )
+        self._conn.execute(
+            "INSERT INTO api_key_events (account_id, event_type, key_hash, created_at) "
+            "VALUES (?, 'revoked', ?, ?)",
+            (account_id, old_hash, now),
+        )
+        self._conn.commit()
+        return new_key
+
+    def set_status(self, account_id: str, status: str) -> bool:
+        cur = self._conn.execute(
+            "UPDATE accounts SET status = ? WHERE account_id = ?",
+            (status, account_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def account_exists(self, account_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM accounts WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        return row is not None
+
     def close(self):
         if self._conn:
             self._conn.close()
