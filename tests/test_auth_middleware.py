@@ -75,4 +75,5 @@ class TestAuthMiddleware:
         resp = client.get(
             "/private", headers={"Authorization": f"Bearer {raw_key}"}
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 403
+        assert "suspended" in resp.json()["detail"]

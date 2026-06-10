@@ -137,9 +137,13 @@ class AccountStore:
         )
 
     def authenticate(self, api_key: str) -> Optional[Account]:
-        """Look up an account by API key. Returns Account or None."""
+        """Look up an account by API key. Returns Account or None.
+
+        Does NOT enforce status — callers should check account.status
+        if they need to reject suspended/disabled accounts.
+        """
         rows = self._conn.execute(
-            "SELECT account_id, api_key_hash FROM accounts WHERE status = 'active'"
+            "SELECT account_id, api_key_hash FROM accounts"
         ).fetchall()
         for row in rows:
             if self.verify_key(api_key, row["api_key_hash"]):

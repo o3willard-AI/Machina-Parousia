@@ -57,11 +57,13 @@ def test_authenticate_wrong_key(store):
 
 
 def test_authenticate_suspended(store):
-    """authenticate refuses suspended accounts."""
+    """authenticate returns account even for suspended accounts; caller checks status."""
     _, raw_key = store.create_account("agent-sus")
     store.set_status("agent-sus", "suspended")
     account = store.authenticate(raw_key)
-    assert account is None
+    assert account is not None
+    assert account.account_id == "agent-sus"
+    assert account.status == "suspended"
 
 
 # ── Key rotation ───────────────────────────────

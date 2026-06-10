@@ -14,6 +14,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from parousia.auth.accounts import AccountStore
+from parousia.auth.mcp_auth import get_auth_context
 from parousia.config import load_config
 from parousia.guard.email_sender import send_email as _smtp_send
 from parousia.guard.rate_limiter import RateLimiter
@@ -64,6 +66,15 @@ def _build_server() -> Server:
 
     server = Server("parousia-guard-mcp")
 
+    # Initialize account store for MCP auth (Story D)
+    # Falls back to in-memory when filesystem path is unwritable (tests, non-root).
+    try:
+        account_store = AccountStore()
+        account_store.connect()
+    except PermissionError:
+        account_store = AccountStore(":memory:")
+        account_store.connect()
+
     # ── Phase 1 + Phase 2 tool listing ───────────────
 
     @server.list_tools()
@@ -102,11 +113,20 @@ def _build_server() -> Server:
     async def handle_call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[TextContent]:
+        # ── Story D: MCP auth ──────────────────────
+        # SSE transport: account injected via context var.
+        # Stdio transport: auth optional — falls back to config.
+        account = get_auth_context()
+        if account:
+            agent_id_override = account.account_id
+        else:
+            agent_id_override = None
+
         # ── Phase 1: send_email ────────────────────
         if name == "send_email":
             return await _handle_send_email(arguments, config, rate_limiter, redis_client)
 
-        agent_id = _resolve_agent_id(config, arguments)
+        agent_id = agent_id_override or _resolve_agent_id(config, arguments)
 
         # ── Phase 2: temporal tools ────────────────
         temporal_names = {s["name"] for s in ALL_TEMPORAL_SCHEMAS}

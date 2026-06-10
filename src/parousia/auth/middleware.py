@@ -45,6 +45,12 @@ class AgentAuthMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        if account.status != "active":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": f"Account is {account.status}"},
+            )
+
         request.state.account = account
         request.state.account_id = account.account_id
         return await call_next(request)
