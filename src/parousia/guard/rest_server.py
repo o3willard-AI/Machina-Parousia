@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -18,6 +19,7 @@ from parousia.config import load_config
 from parousia.auth.accounts import AccountStore
 from parousia.auth.middleware import AgentAuthMiddleware, get_account
 from parousia.auth.onboard import OnboardRequest, OnboardResponse, handle_onboard
+from parousia.inbox.inbox_store import InboxStore
 
 logger = logging.getLogger("parousia.rest")
 
@@ -26,11 +28,15 @@ app = FastAPI(title="Parousia Guard — REST Ingress")
 # ── Account store & auth middleware ──────────────────
 
 _account_store = AccountStore()
+_inbox_store = InboxStore()
 
 
 @app.on_event("startup")
 async def startup_accounts():
     _account_store.connect()
+    # Initialize inbox store
+    global _inbox_store
+    _inbox_store = InboxStore()
 
 
 app.add_middleware(
@@ -96,6 +102,24 @@ async def ingest(request: IngestRequest):
 
     task_id = str(uuid.uuid4())[:12]
 
+    # Create inbox message
+    from parousia.inbox.inbox_store import InboxMessage
+    inbox_message = InboxMessage(
+        id=str(uuid.uuid4()),
+        agent_id=request.agent_id,
+        sender=request.sender,
+        recipient=request.recipient,
+        subject=request.subject,
+        body_text=request.body,
+        body_html=None,  # We don't have HTML in the request
+        received_at=datetime.utcnow().isoformat() + 'Z',
+        read=False,
+        archived=False
+    )
+    
+    # Store message in inbox
+    message_id = _inbox_store.store_message(inbox_message)
+
     # Fire-and-forget: forward to agent webhook asynchronously
     # Postfix pipe expects fast response — don't wait for agent
     import asyncio
@@ -120,7 +144,8 @@ async def ingest(request: IngestRequest):
         },
     )
 
-    return IngestResponse(agent_id=request.agent_id, task_id=task_id)
+    # Return the inbox message ID in the response
+    return IngestResponse(agent_id=request.agent_id, task_id=message_id)
 
 
 async def _forward_to_agent(
@@ -330,3 +355,21 @@ async def rotate_key(request: Request):
         "new_api_key": new_key,
         "message": "Key rotated! Save this new key — it will not be shown again.",
     }
+
+
+# ── Inbox endpoints ───────────────────────
+
+@app.get("/inbox")
+async def list_inbox(agent_id: str, limit: int = 50, offset: int = 0, unread_only: bool = False):
+    """List inbox messages for an agent."""
+    messages = _inbox_store.list_messages(agent_id, limit, offset, unread_only)
+    return [msg.dict() for msg in messages]
+
+
+@app.get("/inbox/{message_id}")
+async def get_inbox_message(message_id: str):
+    """Get a specific inbox message."""
+    message = _inbox_store.get_message(message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return message.dict()
