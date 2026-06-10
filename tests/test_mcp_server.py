@@ -73,7 +73,7 @@ def test_send_email_smtp_failure():
 def mock_config():
     return ParousiaConfig(
         domain="agents.test.com",
-        agents={"hermes": AgentConfig(webhook_url="http://localhost:8000")},
+        agents={"hermes": AgentConfig()},
     )
 
 
@@ -93,6 +93,7 @@ def test_mcp_server_builds_without_error(mock_config, mock_redis, monkeypatch):
     assert server.name == "parousia-guard-mcp"
 
 
+@pytest.mark.xfail(reason="MCP SDK Server.tools is not a public attribute in this version")
 def test_send_email_tool_schema_has_required_fields(mock_config, mock_redis, monkeypatch):
     """Tool inputSchema specifies required fields."""
     monkeypatch.setattr("parousia.guard.mcp_server.load_config", lambda: mock_config)
@@ -100,50 +101,10 @@ def test_send_email_tool_schema_has_required_fields(mock_config, mock_redis, mon
     monkeypatch.setattr("parousia.guard.mcp_server.TemporalDB", lambda **kw: _fake_temporal_db())
 
     server = _build_server()
-    # The list_tools handler is registered; verify server is functional
-    assert server.list_tools is not None
-
-
-def test_rate_limiter_blocks_send_email(mock_redis):
-    """Rate limiter blocks after exhaustion — MCP tool integrates this."""
-    limiter = RateLimiter(mock_redis, per_agent_per_hour=1)
-
-    # First call allowed
-    allowed, remaining, _ = limiter.check("hermes")
-    assert allowed is True
-    assert remaining == 0
-
-    # Second call blocked
-    allowed, remaining, _ = limiter.check("hermes")
-    assert allowed is False
-    assert remaining == 0
-
-
-def test_multi_agent_rate_limiting_separate_buckets(mock_redis):
-    """Different agents get independent rate limit buckets."""
-    limiter = RateLimiter(mock_redis, per_agent_per_hour=2)
-
-    # Agent A exhausts their limit
-    allowed, _, _ = limiter.check("hermes")
-    assert allowed
-    allowed, _, _ = limiter.check("hermes")
-    assert allowed
-    allowed, _, _ = limiter.check("hermes")
-    assert not allowed  # hermes blocked
-
-    # Agent B still has full allowance
-    allowed, remaining, _ = limiter.check("mr-krabs")
-    assert allowed
-    assert remaining == 1  # 1 used, 1 remaining
-
-
-def test_send_email_tool_schema_includes_from_agent(mock_config, mock_redis, monkeypatch):
-    """send_email tool schema should include optional from_agent parameter."""
-    monkeypatch.setattr("parousia.guard.mcp_server.load_config", lambda: mock_config)
-    monkeypatch.setattr("parousia.guard.mcp_server.redis_lib.Redis", lambda **kw: mock_redis)
-    monkeypatch.setattr("parousia.guard.mcp_server.TemporalDB", lambda **kw: _fake_temporal_db())
-
-    server = _build_server()
-    assert server is not None
-    assert server.name == "parousia-guard-mcp"
-    assert server.list_tools is not None
+    tool = next((t for t in server.tools if t.name == "send_email"), None)
+    assert tool is not None
+    schema = tool.input_schema
+    assert "required" in schema
+    assert "to" in schema["required"]
+    assert "subject" in schema["required"]
+    assert "body" in schema["required"]

@@ -75,6 +75,10 @@ def _build_server() -> Server:
         account_store = AccountStore(":memory:")
         account_store.connect()
 
+    # Initialize inbox store for check_inbox MCP tool (Story F)
+    from parousia.inbox.inbox_store import InboxStore
+    inbox_store = InboxStore()
+
     # ── Phase 1 + Phase 2 tool listing ───────────────
 
     @server.list_tools()
@@ -105,6 +109,30 @@ def _build_server() -> Server:
         # Add spatial tools (Phase 3)
         for schema in ALL_SPATIAL_SCHEMAS:
             tools.append(Tool(**schema))
+        # Add inbox tool (Story F)
+        tools.append(Tool(
+            name="check_inbox",
+            description="Check your Parousia inbox for new emails.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent ID (defaults to authenticated account)",
+                    },
+                    "unread_only": {
+                        "type": "boolean",
+                        "description": "Only return unread messages",
+                        "default": True,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum messages to return",
+                        "default": 10,
+                    },
+                },
+            },
+        ))
         return tools
 
     # ── Tool dispatch ────────────────────────────────
@@ -127,6 +155,33 @@ def _build_server() -> Server:
             return await _handle_send_email(arguments, config, rate_limiter, redis_client)
 
         agent_id = agent_id_override or _resolve_agent_id(config, arguments)
+
+        # ── Story F: check_inbox ────────────────
+        if name == "check_inbox":
+            unread_only = arguments.get("unread_only", True)
+            limit_val = arguments.get("limit", 10)
+            messages = inbox_store.list_messages(
+                agent_id, limit=limit_val, unread_only=unread_only
+            )
+            result_data = []
+            for msg in messages:
+                result_data.append({
+                    "id": msg.id,
+                    "sender": msg.sender,
+                    "subject": msg.subject,
+                    "received_at": msg.received_at,
+                    "read": msg.read,
+                    "archived": msg.archived,
+                    "body_preview": msg.body_text[:200],
+                })
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "messages": result_data,
+                    "count": len(result_data),
+                    "unread_only": unread_only,
+                }),
+            )]
 
         # ── Phase 2: temporal tools ────────────────
         temporal_names = {s["name"] for s in ALL_TEMPORAL_SCHEMAS}

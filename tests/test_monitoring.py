@@ -30,7 +30,7 @@ def test_rate_limits_returned():
     from parousia.config import AgentConfig
 
     config = ParousiaConfig(
-        agents={"hermes": AgentConfig(webhook_url="http://x", rate_limit_per_hour=100)},
+        agents={"hermes": AgentConfig(rate_limit_per_hour=100)},
     )
     r = fakeredis.FakeRedis()
     metrics = collect_metrics(config, r)

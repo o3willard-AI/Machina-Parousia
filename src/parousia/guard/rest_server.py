@@ -122,20 +122,6 @@ async def ingest(request: IngestRequest):
     # Store message in inbox
     message_id = _inbox_store.store_message(inbox_message)
 
-    # Fire-and-forget: forward to agent webhook asynchronously
-    # Postfix pipe expects fast response — don't wait for agent
-    import asyncio
-
-    asyncio.create_task(_forward_to_agent(
-        webhook_url=agent_cfg.webhook_url,
-        agent_id=request.agent_id,
-        task_id=task_id,
-        sender=request.sender,
-        subject=request.subject,
-        body=request.body,
-        raw_mime=request.raw_mime,
-    ))
-
     logger.info(
         "ingest accepted",
         extra={
@@ -148,55 +134,6 @@ async def ingest(request: IngestRequest):
 
     # Return the inbox message ID in the response
     return IngestResponse(agent_id=request.agent_id, task_id=message_id)
-
-
-async def _forward_to_agent(
-    webhook_url: str,
-    agent_id: str,
-    task_id: str,
-    sender: str,
-    subject: str,
-    body: str,
-    raw_mime: str,
-    max_retries: int = 3,
-):
-    """Forward task to agent webhook with retry on failure."""
-    import httpx
-
-    payload = {
-        "task_type": "email",
-        "task_id": task_id,
-        "sender": sender,
-        "subject": subject,
-        "body": body,
-        "raw_mime": raw_mime,
-        "agent_id": agent_id,
-    }
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(webhook_url, json=payload)
-                if resp.status_code < 500:
-                    logger.info(
-                        "webhook delivered",
-                        extra={"task_id": task_id, "status": resp.status_code, "attempt": attempt},
-                    )
-                    return
-                logger.warning(
-                    "webhook server error",
-                    extra={"task_id": task_id, "status": resp.status_code, "attempt": attempt},
-                )
-        except Exception as e:
-            logger.warning(
-                "webhook unreachable",
-                extra={"task_id": task_id, "error": str(e), "attempt": attempt},
-            )
-
-        if attempt < max_retries:
-            await asyncio.sleep(2 ** attempt)  # exponential backoff: 2s, 4s, 8s
-
-    logger.error("webhook exhausted retries", extra={"task_id": task_id})
 
 
 # ── Approval endpoints ──────────────────────────

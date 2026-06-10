@@ -52,7 +52,7 @@ def test_config_from_temp_file(tmp_path):
         "domain": "test.example.com",
         "redis": {"port": 6380},
         "agents": {
-            "hermes": {"webhook_url": "http://192.168.1.1:8000/webhook"}
+            "hermes": {}
         },
     }
     config_file = tmp_path / "config.yaml"
@@ -62,7 +62,6 @@ def test_config_from_temp_file(tmp_path):
     cfg = load_config(str(config_file))
     assert cfg.domain == "test.example.com"
     assert cfg.redis.port == 6380
-    assert cfg.agents["hermes"].webhook_url == "http://192.168.1.1:8000/webhook"
     # Defaults still apply for unspecified fields
     assert cfg.rate_limits.per_agent_per_hour == 100
 

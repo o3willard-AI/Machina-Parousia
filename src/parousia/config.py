@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 
 
 class AgentConfig(BaseModel):
-    webhook_url: str = "http://localhost:8000/webhook"
     rate_limit_per_hour: int = 100
 
 
@@ -73,6 +72,14 @@ class SpatialConfig(BaseModel):
     crawl4ai: Crawl4aiConfig = Field(default_factory=Crawl4aiConfig)
 
 
+class AccountStoreConfig(BaseModel):
+    db_path: str = "/var/lib/parousia/accounts.db"
+
+
+class AdminConfig(BaseModel):
+    api_key: str = ""  # Set via PAROUSIA_ADMIN_KEY env var
+
+
 class ParousiaConfig(BaseModel):
     domain: str = "agents.yourdomain.com"
     hostname: str = "mx.agents.yourdomain.com"
@@ -85,6 +92,8 @@ class ParousiaConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
+    account_store: AccountStoreConfig = Field(default_factory=AccountStoreConfig)
+    admin: AdminConfig = Field(default_factory=AdminConfig)
 
 
 def _find_config() -> Optional[Path]:

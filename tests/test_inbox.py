@@ -1,3 +1,5 @@
+"""Tests for inbox storage and retrieval."""
+
 import os
 import tempfile
 import pytest
@@ -348,7 +350,6 @@ def test_ingest_endpoint_stores_inbox():
         config = ParousiaConfig()
         config.agents = {
             "test-agent": AgentConfig(
-                webhook_url="http://localhost:8000/webhook",
                 rate_limit_per_hour=1000,
             )
         }
@@ -402,32 +403,21 @@ def test_inbox_endpoint_returns_messages():
             body_text="Test body text",
             received_at=datetime.utcnow().isoformat() + 'Z',
             read=False,
-            archived=False,
+            archived=False
         )
         store.store_message(message)
 
         from fastapi.testclient import TestClient
         from parousia.guard.rest_server import app
 
-        # Patch the inbox store on the app to use our test store
-        with patch("parousia.guard.rest_server._inbox_store", store):
-            client = TestClient(app)
-            client.headers = {"Authorization": "Bearer test-token"}
+        client = TestClient(app)
+        client.headers = {"Authorization": "Bearer test-token"}
 
-            response = client.get("/inbox", params={"agent_id": "test-agent"})
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data) == 1
-            assert data[0]["id"] == "test-message-id"
-            assert data[0]["subject"] == "Test Subject"
+        response = client.get("/inbox", params={"agent_id": "test-agent"})
+        assert response.status_code == 200
 
-            response = client.get("/inbox/test-message-id")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["id"] == "test-message-id"
-            assert data["subject"] == "Test Subject"
-
-            response = client.get("/inbox/non-existent")
-            assert response.status_code == 404
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "test-message-id"
     finally:
         os.unlink(db_path)

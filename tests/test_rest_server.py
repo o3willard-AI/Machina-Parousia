@@ -48,7 +48,6 @@ def agent_config():
     return ParousiaConfig(
         agents={
             "hermes": AgentConfig(
-                webhook_url="http://localhost:9999/webhook",
                 rate_limit_per_hour=100,
             )
         }
