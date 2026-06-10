@@ -24,9 +24,11 @@ class AgentAuthMiddleware(BaseHTTPMiddleware):
         }
 
     async def dispatch(self, request: Request, call_next):
-        # Public paths skip auth
-        if request.url.path in self.public_paths:
-            return await call_next(request)
+        # Public paths skip auth — supports both exact match and prefix match
+        path = request.url.path
+        for public in self.public_paths:
+            if path == public or path.startswith(public + "/") or path.startswith(public + "?"):
+                return await call_next(request)
 
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):

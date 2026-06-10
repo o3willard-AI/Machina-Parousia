@@ -6,6 +6,7 @@ Accepts parsed email JSON, enforces rate limits, and forwards to agent webhook.
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime
@@ -45,6 +46,7 @@ app.add_middleware(
     public_paths={
         "/health", "/onboard", "/docs", "/openapi.json",
         "/ingest", "/approval/pending", "/metrics", "/dashboard",
+        "/admin",  # Admin endpoints have their own auth (PAROUSIA_ADMIN_KEY)
     },
 )
 
@@ -373,3 +375,56 @@ async def get_inbox_message(message_id: str):
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
     return message.dict()
+
+
+# ── Admin endpoints (Story E) ──────────────
+
+_ADMIN_API_KEY = os.environ.get("PAROUSIA_ADMIN_KEY", "")
+
+
+def _require_admin(request: Request) -> None:
+    """Raise 403 if request doesn't carry the admin API key."""
+    if not _ADMIN_API_KEY:
+        raise HTTPException(status_code=501, detail="Admin API not configured (set PAROUSIA_ADMIN_KEY)")
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or auth[7:] != _ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+@app.post("/admin/accounts")
+async def admin_create_account(request: Request):
+    """Create a paid account. Requires admin API key."""
+    _require_admin(request)
+    body = await request.json()
+    account, api_key = _account_store.create_account(
+        account_id=body["account_id"],
+        tier=body.get("tier", "paid"),
+        email=body.get("email", ""),
+        display_name=body.get("display_name", ""),
+    )
+    return {
+        "account_id": account.account_id,
+        "api_key": api_key,
+        "tier": account.tier,
+        "message": "Account created! Save the API key — it will not be shown again.",
+    }
+
+
+@app.post("/admin/accounts/{account_id}/suspend")
+async def admin_suspend(account_id: str, request: Request):
+    """Suspend an account. Requires admin API key."""
+    _require_admin(request)
+    ok = _account_store.set_status(account_id, "suspended")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return {"account_id": account_id, "status": "suspended"}
+
+
+@app.post("/admin/accounts/{account_id}/reactivate")
+async def admin_reactivate(account_id: str, request: Request):
+    """Reactivate a suspended account. Requires admin API key."""
+    _require_admin(request)
+    ok = _account_store.set_status(account_id, "active")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return {"account_id": account_id, "status": "active"}
