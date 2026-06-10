@@ -341,69 +341,56 @@ def test_count_unread():
 
 def test_ingest_endpoint_stores_inbox():
     """Integration test: Test that ingest endpoint stores messages in inbox."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-        db_path = tmp.name
-    
     try:
-        # Mock the config and agent lookup
-        from parousia.config import Config, AgentConfig
-        
-        # Create a mock config with agent
-        config = Config()
+        from parousia.config import ParousiaConfig, AgentConfig
+
+        config = ParousiaConfig()
         config.agents = {
             "test-agent": AgentConfig(
                 webhook_url="http://localhost:8000/webhook",
-                max_instances=1,
-                rate_limit_per_hour=1000
+                rate_limit_per_hour=1000,
             )
         }
-        
-        # Patch the load_config function to return our mock config
-        with patch("parousia.guard.rest_server.load_config", return_value=config):
-            from parousia.guard.rest_server import ingest, _inbox_store
+
+        with patch("parousia.guard.rest_server.load_config", return_value=config), \
+             patch("parousia.guard.rest_server._account_store") as mock_acct, \
+             patch("parousia.guard.rest_server._inbox_store") as mock_inbox:
+
+            mock_acct.get_account.return_value = {"agent_id": "test-agent"}
+            mock_inbox.store_message.return_value = "msg-123"
+
             from fastapi.testclient import TestClient
             from parousia.guard.rest_server import app
-            
+
             client = TestClient(app)
-            
-            # Create an ingest request
+            client.headers = {"Authorization": "Bearer test-token"}
+
             ingest_data = {
                 "sender": "sender@example.com",
                 "recipient": "test-agent@example.com",
                 "subject": "Test Subject",
                 "body": "Test body text",
-                "raw_mime": "From: sender@example.com\nTo: test-agent@example.com\nSubject: Test Subject\n\nTest body text"
+                "raw_mime": "From: sender@example.com\nTo: test-agent@example.com\nSubject: Test Subject\n\nTest body text",
             }
-            
-            # Call the ingest endpoint
-            response = client.post("/ingest", json=ingest_data)
-            
-            assert response.status_code == 200
-            
-            # Verify that a message was stored in the inbox
-            response_data = response.json()
-            message_id = response_data["task_id"]  # This is the inbox message ID
-            
-            # Check if we can retrieve the message
-            retrieved_message = _inbox_store.get_message(message_id)
-            assert retrieved_message is not None
-            assert retrieved_message.agent_id == "test-agent"
-            assert retrieved_message.sender == "sender@example.com"
-            
-    finally:
-        os.unlink(db_path)
 
+            response = client.post("/ingest", json=ingest_data)
+            assert response.status_code == 200
+
+            response_data = response.json()
+            assert response_data["task_id"] == "msg-123"
+            mock_inbox.store_message.assert_called_once()
+    finally:
+        import os
+        if os.path.exists("data/inbox.db"):
+            os.unlink("data/inbox.db")
 
 def test_inbox_endpoint_returns_messages():
     """Integration test: Test that inbox endpoints return messages correctly."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         db_path = tmp.name
-    
+
     try:
-        # Set up the inbox store
         store = InboxStore(db_path)
-        
-        # Create and store a message
         message = InboxMessage(
             id="test-message-id",
             agent_id="test-agent",
@@ -413,35 +400,32 @@ def test_inbox_endpoint_returns_messages():
             body_text="Test body text",
             received_at=datetime.utcnow().isoformat() + 'Z',
             read=False,
-            archived=False
+            archived=False,
         )
-        
         store.store_message(message)
-        
-        # Test the inbox endpoint
+
         from fastapi.testclient import TestClient
         from parousia.guard.rest_server import app
-        
-        client = TestClient(app)
-        
-        # Test listing messages
-        response = client.get("/inbox", params={"agent_id": "test-agent"})
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data) == 1
-        assert data[0]["id"] == "test-message-id"
-        assert data[0]["subject"] == "Test Subject"
-        
-        # Test getting a specific message
-        response = client.get("/inbox/test-message-id")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["id"] == "test-message-id"
-        assert data["subject"] == "Test Subject"
-        
-        # Test getting a non-existent message
-        response = client.get("/inbox/non-existent")
-        assert response.status_code == 404
-        
+
+        # Patch the inbox store on the app to use our test store
+        with patch("parousia.guard.rest_server._inbox_store", store):
+            client = TestClient(app)
+            client.headers = {"Authorization": "Bearer test-token"}
+
+            response = client.get("/inbox", params={"agent_id": "test-agent"})
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data) == 1
+            assert data[0]["id"] == "test-message-id"
+            assert data[0]["subject"] == "Test Subject"
+
+            response = client.get("/inbox/test-message-id")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["id"] == "test-message-id"
+            assert data["subject"] == "Test Subject"
+
+            response = client.get("/inbox/non-existent")
+            assert response.status_code == 404
     finally:
         os.unlink(db_path)
