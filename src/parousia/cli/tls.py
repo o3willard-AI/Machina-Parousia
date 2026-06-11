@@ -27,7 +27,12 @@ smtpd_tls_received_header = yes
 @click.option("--email", help="Email for Let's Encrypt notifications (required)")
 @click.option("--staging", is_flag=True, help="Use Let's Encrypt staging environment")
 @click.option("--dry-run", is_flag=True, help="Show what would be done without executing")
-def setup_tls(domain, email, staging, dry_run):
+def setup_tls_cmd(domain, email, staging, dry_run):
+    """Set up TLS certificates for Postfix using Let's Encrypt."""
+    setup_tls(domain=domain, email=email, staging=staging, dry_run=dry_run)
+
+
+def setup_tls(domain=None, email=None, staging=False, dry_run=False):
     """Set up TLS certificates for Postfix using Let's Encrypt."""
     from parousia.config import load_config
 

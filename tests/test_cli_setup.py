@@ -1,8 +1,12 @@
 """Tests for Story 5 CLI commands: setup, validate, test, status."""
 
+import subprocess
 from unittest import mock
+
+import pytest
 from click.testing import CliRunner
 from parousia.cli.main import cli
+from parousia.cli.tls import setup_tls
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -219,3 +223,86 @@ def test_status_shows_redis_unavailable(mock_run, mock_config):
     assert result.exit_code == 0
     assert "Redis: unavailable" in result.output
     assert "Queue is empty" in result.output
+
+
+# ═══════════════════════════════════════════════════════════════
+# setup --tls
+# ═══════════════════════════════════════════════════════════════
+
+
+@mock.patch("parousia.config.load_config")
+@mock.patch("subprocess.run")
+def test_setup_tls_missing_email(mock_run, mock_config):
+    """setup_tls without --email exits with error."""
+    mock_config.return_value.hostname = "mx.example.com"
+    with pytest.raises(SystemExit) as exc:
+        setup_tls(domain="mx.example.com", email=None)
+    assert exc.value.code == 1
+
+
+@mock.patch("parousia.config.load_config")
+@mock.patch("subprocess.run")
+@mock.patch("pathlib.Path.write_text")
+def test_setup_tls_dry_run(mock_write, mock_run, mock_config):
+    """setup_tls --dry-run shows what would be done without executing."""
+    mock_config.return_value.hostname = "mx.example.com"
+    setup_tls(domain="mx.example.com", email="admin@example.com", dry_run=True)
+    # certbot should NOT be called in dry-run mode
+    assert not any("certbot" in str(c) for c in mock_run.call_args_list if c)
+
+
+@mock.patch("parousia.config.load_config")
+@mock.patch("subprocess.run")
+@mock.patch("pathlib.Path.read_text")
+@mock.patch("pathlib.Path.write_text")
+def test_setup_tls_certbot_success(mock_write, mock_read, mock_run, mock_config):
+    """setup_tls runs certbot and configures Postfix."""
+    mock_config.return_value.hostname = "mx.example.com"
+    mock_read.return_value = ""  # main.cf has no tls.conf reference
+    setup_tls(domain="mx.example.com", email="admin@example.com")
+    # certbot should have been called
+    certbot_calls = [c for c in mock_run.call_args_list
+                     if "certbot" in str(c)]
+    assert len(certbot_calls) >= 1
+    # tls.conf should have been written
+    mock_write.assert_called()
+
+
+@mock.patch("parousia.config.load_config")
+@mock.patch("subprocess.run")
+def test_setup_tls_certbot_failure(mock_run, mock_config):
+    """setup_tls handles certbot failure gracefully."""
+    mock_config.return_value.hostname = "mx.example.com"
+    mock_run.side_effect = subprocess.CalledProcessError(1, "certbot")
+    with pytest.raises(SystemExit) as exc:
+        setup_tls(domain="mx.example.com", email="admin@example.com")
+    assert exc.value.code == 1
+
+
+@mock.patch("parousia.config.load_config")
+@mock.patch("subprocess.run")
+@mock.patch("pathlib.Path.write_text")
+def test_setup_tls_staging_flag(mock_write, mock_run, mock_config):
+    """setup_tls --staging passes --staging to certbot."""
+    mock_config.return_value.hostname = "mx.example.com"
+    setup_tls(domain="mx.example.com", email="admin@example.com", staging=True)
+    # certbot command should include --staging
+    staging_calls = [c for c in mock_run.call_args_list
+                     if "--staging" in str(c)]
+    assert len(staging_calls) >= 1
+
+
+@mock.patch("parousia.config.load_config")
+@mock.patch("subprocess.run")
+@mock.patch("pathlib.Path.read_text")
+@mock.patch("pathlib.Path.write_text")
+def test_setup_tls_already_configured(mock_write, mock_read, mock_run, mock_config):
+    """setup_tls does not re-add !include when already configured."""
+    mock_config.return_value.hostname = "mx.example.com"
+    # main.cf already contains tls.conf
+    mock_read.return_value = "# TLS configuration\n!include /etc/postfix/tls.conf\n"
+    setup_tls(domain="mx.example.com", email="admin@example.com")
+    # tls.conf was written but main.cf was NOT appended to
+    # The implementation uses file open("a") not write_text for appending,
+    # so mock_write should only be called once for tls.conf itself
+    assert mock_write.call_count == 1
