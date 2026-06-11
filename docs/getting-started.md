@@ -94,11 +94,10 @@ ufw allow 25/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow 8080/tcp
-ufw allow 8081/tcp
 ufw enable
 
 # firewalld (RHEL/Fedora)
-# firewall-cmd --permanent --add-port={25,80,443,8080,8081}/tcp
+# firewall-cmd --permanent --add-port={25,80,443,8080}/tcp
 # firewall-cmd --reload
 ```
 
@@ -297,7 +296,7 @@ server:
   rest_host: "127.0.0.1"
   rest_port: 8080
   mcp_host: "0.0.0.0"
-  mcp_port: 8081
+  mcp_port: 8081       # stdio transport only — no network port needed
 
 agents:
   # Add your agents here. These are the local parts before @yourdomain.com

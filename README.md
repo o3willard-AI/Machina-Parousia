@@ -97,7 +97,7 @@ parousia-guard setup --config
 parousia-guard serve
 ```
 
-This starts the REST API on `:8080` and MCP on `:8081`. Email tools will attempt `localhost:25` delivery — which will fail without Postfix, but the MCP server and all temporal/spatial tools work.
+This starts the REST API on 127.0.0.1:8080. For MCP tools, agents spawn `parousia-guard serve --mcp` as a subprocess (stdio transport).
 
 For a full production deployment with working email, see **[docs/getting-started.md](docs/getting-started.md)**.
 
@@ -113,14 +113,15 @@ For a full production deployment with working email, see **[docs/getting-started
                    │                 │
   inbound mail ───→│ Postfix :25 ────→│ pipe ──→│  Parousia Guard  │
                    │                 │         │    REST :8080     │
-  Agent ──────────→│ Parousia Guard ──→│ Postfix :25 ──→ outbound mail
-                   │   MCP :8081     │
-                   │                 │
+                   │                 │         │                   │
+  Agent spawns ───→│ parousia-guard  │  MCP stdio subprocess      │
+  serve --mcp      │                 │  (per-agent session)       │
+                   │                 │                             │
                    │  ┌──────────────┤
                    │  │  Temporal    │  SQLite: calendar, journal
                    │  │  Engine      │  DSL serializer, conflict resolver
                    │  ├──────────────┤
-                   │  │  Spatial     │  Per-agent Chromium × N
+                   │  │  Spatial     │  Per-agent Chromium x N
                    │  │  Engine      │  SDOM serializer, browser pool
                    │  ├──────────────┤
                    │  │  Inbox       │  Per-agent SQLite inboxes

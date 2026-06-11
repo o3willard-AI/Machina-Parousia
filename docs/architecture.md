@@ -14,9 +14,10 @@ How Parousia's components fit together and what happens when things happen.
                    │                 │
   inbound mail ───→│ Postfix :25 ────→│ pipe ──→ parousia_pipe.py ──→ POST /ingest
                    │                 │                                    │
-  Agent ──────────→│ Parousia Guard ──→ Postfix :25 ──→ outbound mail    │
-                   │   MCP :8081     │   (localhost relay)               │
-                   │                 │                                    │
+  Agent spawns ───→│ MCP subprocess │                                    │
+  parousia-guard   │ (stdio)        │                                    │
+  serve --mcp      │                │                                    │
+                   │                │                                    │
                    │  ┌──────────────┤                                    │
                    │  │  REST API    │←───────────────────────────────────┘
                    │  │  :8080       │
@@ -24,8 +25,8 @@ How Parousia's components fit together and what happens when things happen.
                    │  │              │  /dashboard /approval/*
                    │  │              │  /onboarding /account/*
                    │  ├──────────────┤
-                   │  │  MCP Server  │  /sse endpoint
-                   │  │  :8081       │  11 tools (email ×2, temp ×6, spatial ×3)
+                   │  │  MCP Server  │  Stdio transport (spawned per-agent)
+                   │  │  (stdio)     │  11 tools (email ×2, temp ×6, spatial ×3)
                    │  ├──────────────┤
                    │  │  Auth        │  bcrypt API key validation
                    │  │  Middleware  │  AccountStore → tier/permissions
@@ -53,6 +54,26 @@ How Parousia's components fit together and what happens when things happen.
 
 ---
 
+## Transport model
+
+Parousia has two server processes, started from the same `parousia-guard serve` entry point:
+
+| Server | How it runs | Transport | Port |
+|--------|-----------|-----------|------|
+| **REST** | Systemd daemon (`parousia-guard serve --rest`) | HTTP | 127.0.0.1:8080 |
+| **MCP** | Per-agent subprocess (`parousia-guard serve --mcp`) | Stdio (stdin/stdout) | None |
+
+The REST server runs continuously as a systemd service. It handles health checks, email ingest from Postfix, metrics, onboarding, and account management.
+
+The MCP server is **spawned on demand** by each agent — the agent's host runs `parousia-guard serve --mcp` as a subprocess and communicates via stdin/stdout using the MCP JSON-RPC protocol. This means:
+- No network port needed for MCP
+- Each agent gets its own MCP session with its own browser profile, DB connection, and auth context
+- MCP processes are short-lived (one per agent session) and exit when the agent disconnects
+
+Both servers share the same codebase, same config file, same database files, and same Redis instance. REST and MCP read/write to the same InboxStore, TemporalDB, AccountStore, and BrowserPool.
+
+---
+
 ## Component contracts
 
 ### Postfix ↔ Parousia Guard
@@ -75,7 +96,7 @@ How Parousia's components fit together and what happens when things happen.
 
 **REST API** (`:8080`): Stateless HTTP endpoints for ingest, health, metrics, dashboard, onboarding, account management, and approval queue. Called by the pipe script, admin CLI, and monitoring systems.
 
-**MCP Server** (`:8081`): Stateful SSE connection per agent. Tools call into the same AccountStore, InboxStore, TemporalDB, and BrowserPool that the REST API uses. Auth middleware extracts `Authorization: Bearer`, validates against AccountStore, and injects `agent_id` into the tool context.
+**MCP Server** (stdio): Stateless per-invocation. Tools call into the same AccountStore, InboxStore, TemporalDB, and BrowserPool that the REST API uses. Auth context is passed through a context variable set by the stdio transport handler.
 
 **Key property:** REST and MCP share the same data stores. An email ingested via REST POST is immediately available via MCP `check_inbox`. A calendar event created via MCP `schedule_event` is visible to the REST health/metrics endpoints.
 
@@ -90,8 +111,8 @@ Agents can bridge them: browse a conference website (spatial), extract dates, sc
 **Direction:** Read by all components on every authenticated request
 
 Every MCP and REST request (except `/health` and `/onboarding`) goes through:
-1. Extract `Authorization: Bearer *** header
-2. AccountStore.lookup(key_hash) — bcrypt compare
+1. Extract account identity from auth context (MCP: context variable set by transport; REST: `Authorization: Bearer` header)
+2. AccountStore.lookup() — validate API key
 3. Resolve `account_id`, `tier`, `status`
 4. Inject into request context
 5. All downstream operations scope by `account_id`
@@ -108,52 +129,49 @@ Config-based agents (`config.yaml` → `agents:`) are a fallback when no auth he
 
 2. Postfix accepts the message
    → Checks: is recipient domain in relay_domains? Yes (yourdomain.com)
-   → Checks: smtpd_relay_restrictions (permit_mynetworks for local, reject_unauth_destination for external)
 
 3. Postfix routes via pipe transport
-   → master.cf: parousia  unix  -  n  n  -  -  pipe  flags=R user=parousia argv=/opt/parousia/parousia_pipe.py
-   → Spawns process as user 'parousia'
+   → master.cf: parousia pipe → spawns /opt/parousia/parousia_pipe.py as user 'parousia'
    → Feeds raw MIME via stdin
 
 4. parousia_pipe.py parses MIME
    → BytesParser(policy=policy.default).parsebytes(stdin)
-   → Extracts: From header, To header, Subject, text/plain body, raw bytes
-   → Determines agent_id from local part of To: hermes@yourdomain.com → "hermes"
+   → Extracts: From, To, Subject, body, raw bytes
+   → Determines agent_id from local part of To address
 
 5. Pipe POSTs to REST ingest endpoint
    → POST http://127.0.0.1:8080/ingest
-   → JSON payload: {sender, recipient, subject, body, raw_mime, agent_id}
-   → Timeout: 10 seconds
+   → JSON payload: {sender, recipient, subject, body, agent_id}
 
 6. REST /ingest handler
-   → Validates required fields (sender, recipient, subject, body)
+   → Validates required fields
    → Rate-limiter check (Redis token bucket)
-   → DKIM validation (optional, if dkimpy available)
+   → DKIM validation (optional)
    → InboxStore.insert(message) → SQLite
-   → Returns {"status": "accepted"} within ~250ms
+   → Returns {"status": "accepted"}
 
 7. Postfix sees exit code 0 → delivery complete
-   → If exit ≠ 0: Postfix queues and retries (deferred queue)
+   → If exit ≠ 0: Postfix queues and retries
 
 8. Agent reads via MCP check_inbox
-   → Authorization: Bearer *** → AccountStore → agent_id
+   → Agent spawns parousia-guard serve --mcp
+   → MCP tool call: check_inbox
    → InboxStore.get_messages(agent_id, unread_only=True)
    → Messages marked read
-   → Returns to agent's MCP session
 ```
 
 ## Life of an MCP temporal call
 
 ```
-1. Agent connects to :8081/sse
-   → MCP SSE transport with Authorization header
-   → Server accepts, session established
+1. Agent spawns MCP subprocess
+   → parousia-guard serve --mcp
+   → MCP handshake over stdin/stdout
 
 2. Agent calls get_temporal_context
-   → MCP message: {method: "tools/call", params: {name: "get_temporal_context", arguments: {mode: "standard"}}}
+   → MCP message via stdin: {method: "tools/call", params: {name: "get_temporal_context", arguments: {mode: "standard"}}}
 
 3. MCP server routes
-   → Auth middleware: validate API key → resolve agent_id
+   → Auth middleware: resolve agent_id from context
    → dispatch(): name matches TemporalToolHandlers
    → TemporalToolHandlers._handle_get_temporal_context(args, agent_id)
 
@@ -162,14 +180,11 @@ Config-based agents (`config.yaml` → `agents:`) are a fallback when no auth he
    → TemporalDB.get_journal_entries(agent_id)
    → TemporalSerializer.to_dsl(agent_id, mode)
      → Now header: !NOW: YYYY-MM-DD ...
-     → Past window: events with status=completed
-     → Planned window: events with status=confirmed
-     → Journal: milestone entries
+     → Past window, Planned window, Journal sections
    → TemporalSerializer.get_conflicts(agent_id)
-     → Overlap detection between confirmed events
-   → OpportunisticInjector: add consideration hint if conflicts exist
+   → OpportunisticInjector: add consideration hint
 
-5. Response returns to agent
+5. Response returns via stdout
    → JSON: {context: "#TIMEBOX\n...", conflicts: [...], consideration: "..."}
    → Agent processes the DSL, plans accordingly
 ```
@@ -177,39 +192,32 @@ Config-based agents (`config.yaml` → `agents:`) are a fallback when no auth he
 ## Life of an MCP spatial call
 
 ```
-1. Agent calls browse_to
+1. Agent calls browse_to via MCP stdio
    → {method: "tools/call", params: {name: "browse_to", arguments: {url: "https://..."}}}
 
 2. MCP server routes
    → Auth → agent_id
-   → dispatch(): name matches SpatialToolHandlers
-   → SpatialToolHandlers._handle_browse_to(args, agent_id)
+   → dispatch(): SpatialToolHandlers._handle_browse_to(args, agent_id)
 
 3. Browser pool
    → BrowserPoolManager.get_browser(agent_id)
    → Check: does agent have an existing browser?
-     → Yes + alive: reuse, update last_used_at
-     → No: launch new Chromium via Playwright
-       → Create profile dir: /var/lib/parousia/browsers/{agent_id}/
-       → Acquire profile lock (.lock file with PID)
-       → Launch with: --no-sandbox --headless=new --disable-gpu
-   → browser.new_page()
-   → page.goto(url, timeout=timeout_ms)
+     → Yes + alive: reuse
+     → No: launch Chromium via Playwright
+       → Create profile, acquire lock
+       → --no-sandbox --headless=new --disable-gpu
+   → page.goto(url)
 
 4. SDOM extraction
    → page.content() → raw HTML
    → SpatialSerializer.to_sdom(html, extract_mode)
-     → BeautifulSoup4 parse
-     → Detect interactive elements: a, button, input, select, textarea, [role=]
-     → Filter invisible elements (display:none, visibility:hidden, zero-size)
-     → Assign sequential IDs: a1, a2, btn1, input0...
-     → Classify page type: login/search_results/form/error/dashboard/article/product/generic
-     → Extract content sections by heading hierarchy
-     → Compress + truncate long text
+     → BeautifulSoup4 parse → interactive elements → filter invisible
+     → Assign IDs: a1, a2, btn1, input0...
+     → Classify page type
+     → Compress + truncate
 
-5. Response returns to agent
-   → SDOM JSON with meta, interactive_elements, content_sections, context
-   → Agent reads SDOM, plans interactions
+5. Response returns via stdout
+   → SDOM JSON with meta, interactive_elements, content_sections
 ```
 
 ---
@@ -222,78 +230,8 @@ All databases are SQLite files in `/var/lib/parousia/` (configurable):
 /var/lib/parousia/
 ├── temporal.db       # events + journal tables
 ├── accounts.db        # accounts + api_key_events tables
-├── inbox.db           # inbox_messages table
+├── inbox.db           # inbox_messages table (or data/inbox.db)
 └── browsers/          # per-agent Chromium profile directories
-    ├── hermes/
-    │   └── profile.lock
-    ├── mr-krabs/
-    └── ...
-```
-
-**Temporal DB schema:**
-```sql
-CREATE TABLE events (
-    id TEXT PRIMARY KEY,           -- agent_id:short_id (e.g., "hermes:e3")
-    agent_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    start_time TEXT NOT NULL,      -- ISO 8601
-    end_time TEXT,
-    flexibility TEXT DEFAULT 'high',
-    status TEXT DEFAULT 'confirmed',
-    event_type TEXT DEFAULT 'event',
-    stakeholders TEXT,
-    metadata TEXT DEFAULT '{}'
-);
-
-CREATE TABLE journal (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    description TEXT,
-    entry_type TEXT DEFAULT 'milestone',
-    occurred_at TEXT NOT NULL,
-    tags TEXT
-);
-```
-
-**Account DB schema:**
-```sql
-CREATE TABLE accounts (
-    account_id TEXT PRIMARY KEY,
-    display_name TEXT,
-    api_key_hash TEXT NOT NULL,    -- bcrypt
-    tier TEXT DEFAULT 'free',
-    status TEXT DEFAULT 'active',
-    email TEXT,
-    created_at TEXT NOT NULL,
-    last_seen_at TEXT,
-    rate_limit_per_hour INTEGER DEFAULT 100,
-    browser_max_instances INTEGER DEFAULT 1
-);
-
-CREATE TABLE api_key_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,       -- created | rotated | revoked
-    key_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-```
-
-**Inbox DB schema:**
-```sql
-CREATE TABLE inbox_messages (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT NOT NULL,
-    sender TEXT NOT NULL,
-    recipient TEXT NOT NULL,
-    subject TEXT,
-    body_text TEXT,
-    body_html TEXT,
-    received_at TEXT NOT NULL,
-    read BOOLEAN DEFAULT 0,
-    archived BOOLEAN DEFAULT 0
-);
 ```
 
 ---
@@ -307,12 +245,10 @@ server:
   rest_host: "127.0.0.1"
   rest_port: 8080
   mcp_host: "0.0.0.0"
-  mcp_port: 8081
+  mcp_port: 8081          # for reference only — MCP uses stdio transport
 
 agents:
   hermes:
-    rate_limit_per_hour: 100
-  mr-krabs:
     rate_limit_per_hour: 100
 
 redis:
@@ -348,7 +284,7 @@ account_store:
   db_path: /var/lib/parousia/accounts.db
 
 admin:
-  api_key: ""   # Set via PAROUSIA_ADMIN_KEY env var
+  api_key: ""
 
 logging:
   level: info

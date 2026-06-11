@@ -137,7 +137,7 @@ Key properties:
 ## How outbound mail flows
 
 ```
-Agent → MCP send_email (:8081)
+Agent → MCP send_email (stdio transport)
   → AccountStore.auth() (validate API key)
   → RateLimiter.check() (Redis token bucket)
   → smtplib.SMTP('localhost', 25)

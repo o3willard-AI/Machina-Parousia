@@ -68,7 +68,6 @@ Your EC2 security group needs:
 | Inbound | 80 | 0.0.0.0/0 | HTTP (Let's Encrypt) |
 | Inbound | 443 | 0.0.0.0/0 | HTTPS |
 | Inbound | 8080 | Your IP | REST API |
-| Inbound | 8081 | Trusted IPs | MCP server (or 0.0.0.0/0 if agents are remote) |
 | Outbound | 25 | 0.0.0.0/0 | Direct MX delivery (if not using SES) |
 | Outbound | 587 | 0.0.0.0/0 | SES relay (if using SES) |
 | Outbound | 443 | 0.0.0.0/0 | HTTPS (package installs, API calls) |
@@ -89,7 +88,7 @@ Hetzner's cloud firewall sits outside the VM. Configure in the Hetzner Cloud Con
 
 | Direction | Port | Source |
 |-----------|------|--------|
-| Inbound | 22, 25, 80, 443, 8080, 8081 | 0.0.0.0/0 |
+| Inbound | 22, 25, 80, 443, 8080 | 0.0.0.0/0 |
 | Outbound | All | 0.0.0.0/0 |
 
 ### Reverse DNS
@@ -110,7 +109,7 @@ DigitalOcean cloud firewall:
 
 | Direction | Port | Source |
 |-----------|------|--------|
-| Inbound | 22, 25, 80, 443, 8080, 8081 | All IPv4/IPv6 |
+| Inbound | 22, 25, 80, 443, 8080 | All IPv4/IPv6 |
 
 ### Reverse DNS
 
@@ -130,7 +129,7 @@ Linode cloud firewall:
 
 | Direction | Port | Source |
 |-----------|------|--------|
-| Inbound | 22, 25, 80, 443, 8080, 8081 | 0.0.0.0/0 |
+| Inbound | 22, 25, 80, 443, 8080 | 0.0.0.0/0 |
 
 ### Reverse DNS
 

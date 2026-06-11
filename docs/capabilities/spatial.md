@@ -7,7 +7,7 @@ Parousia gives every agent a persistent web browser. Agents navigate, interact, 
 ## Architecture
 
 ```
-Agent → MCP browse_to/interact/extract_page_state (:8081)
+Agent → MCP browse_to/interact/extract_page_state (stdio transport)
   → SpatialToolHandlers.dispatch()
   → BrowserPoolManager.get_browser(agent_id)
   → Playwright Chromium (per-agent persistent profile)
