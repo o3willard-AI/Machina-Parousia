@@ -1,17 +1,20 @@
 # AWS EC2 Provisioning Guide
 
+> This is an AWS-specific companion to [getting-started.md](getting-started.md).  
+> Read the generic provisioning guide first — this covers only AWS-specific details.
+
 How to provision the Parousia mail guard on an AWS EC2 instance.
 
 ## Instance Specification
 
 | Setting | Value |
 |---------|-------|
-| **Instance type** | t3.small (2 vCPU, 2 GB RAM) |
+| **Instance type** | t3.medium (2 vCPU, 4 GB RAM) or m7i-flex.large (2 vCPU, 8 GB RAM) for spatial browsing |
 | **AMI** | Ubuntu 24.04 LTS (HVM, SSD) |
-| **Root volume** | 20 GB gp3 (general purpose SSD) |
+| **Root volume** | 20 GB gp3 for email+temporal only, 80 GB gp3 with spatial |
 | **Region** | us-east-1 (or closest to your users) |
 
-Cost: ~$15/month base + ~$3/month for 20 GB gp3. Elastic IP is free when attached to a running instance.
+Cost: ~$30-55/month for the instance + $3-10/month for storage. Elastic IP is free when attached to a running instance.
 
 ## Step 1: Launch EC2 Instance
 
@@ -144,24 +147,29 @@ sudo ufw enable
 sudo ufw status verbose
 ```
 
-## Step 4: Port 25 Restriction Removal
+## Step 4: Outbound Mail — Port 25 or SES
 
-AWS blocks outbound port 25 on new accounts by default. You must request removal.
+AWS blocks outbound port 25 on all new accounts by default. You have two paths:
+
+### Option A: Remove the port 25 restriction (1-2 day approval)
 
 1. Go to **AWS Support → Create case → Service limit increase**
 2. Select: **EC2** → **Email sending limit**
-3. Request: "Remove port 25 restriction for EC2 instance <instance-id>. This instance will run Postfix for a self-hosted mail server. We have proper SPF/DKIM/DMARC configured and will not send spam."
+3. Request: "Remove port 25 restriction for EC2 instance <instance-id>. This instance will run Postfix for machinaparousia.ai — a self-hosted agentic mail server. SPF, DKIM, and DMARC configured. Volume < 100 msg/day."
 4. AWS reviews within 1-2 business days.
 
-### Fallback: Cloudflare Email Routing (while waiting)
+### Option B: Use SES as smarthost relay (faster approval, ~hours)
 
-If port 25 isn't open yet, use Cloudflare Email Routing as a temporary inbound path:
+Route outbound mail through Amazon SES on port 587 (always open on EC2). Full SES walkthrough is in [hosting.md](hosting.md#amazon-ses). In brief:
 
-1. In Cloudflare dashboard → **Email → Email Routing**
-2. Add your domain, configure DNS records as prompted
-3. Create a catch-all rule → forward to your agent's webhook URL
-4. This gives you inbound mail while waiting for AWS port 25 approval
-5. Once port 25 is open, switch DNS MX records to your EC2 IP
+1. Verify your domain in SES console
+2. Add 3 DKIM CNAME records to your DNS
+3. Get SMTP credentials (SES → SMTP settings)
+4. Request production access (SES → Account dashboard)
+5. Configure Postfix as smarthost relay
+6. Update SPF to include `amazonses.com`
+
+SES costs $0.10 per 1,000 emails. First 62,000/month free from EC2.
 
 ## Step 5: Install Dependencies
 
