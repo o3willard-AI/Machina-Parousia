@@ -338,6 +338,30 @@ def serve(mode_rest, mode_mcp, mode_all):
         mode_rest = True
         mode_mcp = True
 
+    if mode_rest and mode_mcp:
+        # Start both: REST in daemon thread, MCP in main thread
+        import threading
+        import uvicorn
+
+        click.echo("Starting REST ingress server on 127.0.0.1:8080")
+        rest_thread = threading.Thread(
+            target=uvicorn.run,
+            kwargs={
+                "app": "parousia.guard.rest_server:app",
+                "host": "127.0.0.1",
+                "port": 8080,
+                "log_level": "info",
+            },
+            daemon=True,
+        )
+        rest_thread.start()
+
+        from parousia.guard.mcp_server import main as mcp_main
+
+        click.echo("Starting MCP outbound server (stdio transport)")
+        mcp_main()
+        return
+
     if mode_rest:
         import uvicorn
 
@@ -348,14 +372,14 @@ def serve(mode_rest, mode_mcp, mode_all):
             port=8080,
             log_level="info",
         )
-        return  # uvicorn.run blocks
+        return
 
     if mode_mcp:
         from parousia.guard.mcp_server import main as mcp_main
 
         click.echo("Starting MCP outbound server (stdio transport)")
         mcp_main()
-        return  # mcp_main blocks
+        return
 
 
 # ── Temporal group (Phase 2) ─────────────────────────────────────────

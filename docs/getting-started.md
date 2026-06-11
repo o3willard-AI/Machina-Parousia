@@ -9,8 +9,8 @@ This guide covers provisioning a host for Parousia from scratch. It's **provider
 - A **domain name** you control DNS for (e.g., `yourdomain.com`)
 - A **host with a publicly routable static IP address** (VPS, dedicated server, EC2, etc.)
 - **Root/sudo access** to the host
-- Ability to open **inbound ports**: 25 (SMTP), 80 (HTTP), 443 (HTTPS), 8080 (REST), 8081 (MCP)
-- Ability to make **outbound connections** on port 25 (or 587 for smarthost relay)
+- Ability to open **inbound ports**: 25 (SMTP), 80 (HTTP), 443 (HTTPS), 8080 (REST)
+- MCP transport is **stdio** — agents spawn the MCP server as a subprocess over SSH or local execution. No network port needed for MCP.
 
 ---
 

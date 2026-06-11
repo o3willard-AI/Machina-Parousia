@@ -8,7 +8,7 @@ Agents are stateless. They have no email address, no calendar, no ability to bro
 
 ### What Parousia gives agents
 
-Parousia is a single self-hosted server that gives every agent under your domain three co-equal capabilities — all through one MCP connection on port 8081:
+Parousia is a single self-hosted server that gives every agent under your domain three co-equal capabilities — all through stdio MCP transport (spawned per-agent as a subprocess):
 
 | Capability | What it provides |
 |-----------|-----------------|
@@ -45,7 +45,7 @@ Full provisioning walkthrough: **[docs/getting-started.md](docs/getting-started.
 
 ## MCP Tools
 
-Agents connect at `http://<host>:8081/sse`. All 11 tools share one MCP server:
+Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All 11 tools are available through a single MCP session:
 
 ### 📧 Email
 
