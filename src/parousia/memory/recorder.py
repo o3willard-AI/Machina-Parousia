@@ -229,11 +229,13 @@ class MemoryRecorder:
             try:
                 memory = self._get_memory()
                 messages = [{"role": "user", "content": fact}]
+                # Use infer=False when no LLM is configured (embed-only mode)
+                infer = bool(self._config.llm_provider)
                 memory.add(
                     messages,
                     user_id=mem0_user_id,
                     agent_id="parousia",
-                    infer=True,
+                    infer=infer,
                 )
                 self._record_success()
                 logger.debug("Mem0 recorded: %s → %s", tool_name, fact[:100])
