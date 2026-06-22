@@ -36,7 +36,7 @@ class Mem0Config:
 
     def to_mem0_dict(self) -> dict:
         """Convert to mem0.Memory.from_config() dict."""
-        return {
+        config = {
             "vector_store": {
                 "provider": self.vector_store_provider,
                 "config": {
@@ -45,20 +45,36 @@ class Mem0Config:
                     "embedding_model_dims": self.embedding_model_dims,
                 },
             },
-            "llm": {
+            "history_db_path": "/var/lib/parousia/mem0_history.db",
+        }
+
+        # Embedder config — supports lmstudio and fastembed
+        if self.embedder_provider == "fastembed":
+            config["embedder"] = {
+                "provider": "fastembed",
+                "config": {
+                    "model": self.embedder_model,
+                    "embedding_dims": self.embedding_model_dims,
+                },
+            }
+        else:
+            config["embedder"] = {
+                "provider": self.embedder_provider,
+                "config": {
+                    "model": self.embedder_model,
+                    "lmstudio_base_url": self.embedder_base_url,
+                },
+            }
+
+        # LLM config — only if provider is set (skip for embed-only mode)
+        if self.llm_provider:
+            config["llm"] = {
                 "provider": self.llm_provider,
                 "config": {
                     "model": self.llm_model,
                     "lmstudio_base_url": self.llm_base_url,
                     "temperature": self.llm_temperature,
                 },
-            },
-            "embedder": {
-                "provider": self.embedder_provider,
-                "config": {
-                    "model": self.embedder_model,
-                    "lmstudio_base_url": self.embedder_base_url,
-                },
-            },
-            "history_db_path": "/var/lib/parousia/mem0_history.db",
-        }
+            }
+
+        return config
