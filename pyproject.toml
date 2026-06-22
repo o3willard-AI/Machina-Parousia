@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     "redis>=5.0",
     "mcp>=1.0.0",
+    "starlette>=0.27",
     "pydantic>=2.0",
     "PyYAML>=6.0",
     "icalendar>=5.0",

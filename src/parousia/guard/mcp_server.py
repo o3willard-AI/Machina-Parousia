@@ -1,7 +1,11 @@
 """MCP outbound server for Parousia Guard.
 
-Exposes a send_email tool (Phase 1) and temporal tools (Phase 2)
-to AI agents via MCP protocol (stdio transport).
+Exposes a send_email tool (Phase 1), temporal tools (Phase 2),
+and spatial tools (Phase 3) to AI agents via MCP protocol.
+
+Supports two transports:
+  - stdio: traditional MCP stdio transport (for local/CLI use)
+  - SSE: Server-Sent Events over HTTP (for remote agent access)
 """
 
 import asyncio
@@ -11,8 +15,12 @@ from typing import Any
 
 import redis as redis_lib
 from mcp.server import Server
+from mcp.server.sse import SseServerTransport
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Mount, Route
 
 from parousia.auth.accounts import AccountStore
 from parousia.auth.mcp_auth import get_auth_context
@@ -304,6 +312,46 @@ async def run_mcp_server():
         await server.run(
             read_stream, write_stream, server.create_initialization_options(),
         )
+
+
+async def run_mcp_server_sse(host: str = "0.0.0.0", port: int = 8081):
+    """Start the MCP server with SSE transport for remote agent access.
+
+    Args:
+        host: Bind address (default: 0.0.0.0 for public access).
+        port: TCP port (default: 8081).
+    """
+    import uvicorn
+
+    server = _build_server()
+    sse = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await server.run(
+                streams[0], streams[1],
+                server.create_initialization_options(),
+            )
+        return Response()
+
+    routes = [
+        Route("/sse", endpoint=handle_sse, methods=["GET"]),
+        Mount("/messages/", app=sse.handle_post_message),
+    ]
+
+    starlette_app = Starlette(routes=routes)
+
+    config = uvicorn.Config(
+        starlette_app,
+        host=host,
+        port=port,
+        log_level="info",
+    )
+    server_instance = uvicorn.Server(config)
+    logger.info("MCP server running on SSE transport (http://%s:%d/sse)", host, port)
+    await server_instance.serve()
 
 
 def main():

@@ -1,5 +1,7 @@
 """CLI entry point for parousia-guard."""
 
+import asyncio
+
 import click
 
 from parousia import __version__
@@ -330,16 +332,19 @@ def ingest():
 
 @cli.command()
 @click.option("--rest", "mode_rest", is_flag=True, help="Start REST ingress server")
-@click.option("--mcp", "mode_mcp", is_flag=True, help="Start MCP outbound server")
-@click.option("--all", "mode_all", is_flag=True, help="Start both servers")
-def serve(mode_rest, mode_mcp, mode_all):
+@click.option("--mcp", "mode_mcp", is_flag=True, help="Start MCP outbound server (stdio transport)")
+@click.option("--mcp-sse", "mode_mcp_sse", is_flag=True, help="Start MCP outbound server (SSE transport)")
+@click.option("--mcp-host", default="0.0.0.0", help="MCP SSE bind address (default: 0.0.0.0)")
+@click.option("--mcp-port", default=8081, type=int, help="MCP SSE port (default: 8081)")
+@click.option("--all", "mode_all", is_flag=True, help="Start REST + MCP SSE servers")
+def serve(mode_rest, mode_mcp, mode_mcp_sse, mcp_host, mcp_port, mode_all):
     """Start Parousia guard servers."""
-    if mode_all or (not mode_rest and not mode_mcp):
+    if mode_all or (not mode_rest and not mode_mcp and not mode_mcp_sse):
         mode_rest = True
         mode_mcp = True
 
     if mode_rest and mode_mcp:
-        # Start both: REST in daemon thread, MCP in main thread
+        # Start both: REST in daemon thread, MCP SSE in main thread
         import threading
         import uvicorn
 
@@ -356,10 +361,10 @@ def serve(mode_rest, mode_mcp, mode_all):
         )
         rest_thread.start()
 
-        from parousia.guard.mcp_server import main as mcp_main
+        from parousia.guard.mcp_server import run_mcp_server_sse
 
-        click.echo("Starting MCP outbound server (stdio transport)")
-        mcp_main()
+        click.echo(f"Starting MCP outbound server (SSE transport) on {mcp_host}:{mcp_port}")
+        asyncio.run(run_mcp_server_sse(host=mcp_host, port=mcp_port))
         return
 
     if mode_rest:
@@ -372,6 +377,13 @@ def serve(mode_rest, mode_mcp, mode_all):
             port=8080,
             log_level="info",
         )
+        return
+
+    if mode_mcp_sse:
+        from parousia.guard.mcp_server import run_mcp_server_sse
+
+        click.echo(f"Starting MCP outbound server (SSE transport) on {mcp_host}:{mcp_port}")
+        asyncio.run(run_mcp_server_sse(host=mcp_host, port=mcp_port))
         return
 
     if mode_mcp:
