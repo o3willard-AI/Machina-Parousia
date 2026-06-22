@@ -66,13 +66,13 @@ class Mem0Config:
                 },
             }
 
-        # LLM config — always provide one to prevent OpenAI default
-        # When llm_provider is empty, use a disabled placeholder
+        # LLM config — always provide one to prevent OpenAI credential check
+        # When llm_provider is empty, use openai as placeholder (never called with infer=False)
         config["llm"] = {
-            "provider": self.llm_provider or "none",
+            "provider": self.llm_provider or "openai",
             "config": {
-                "model": self.llm_model or "disabled",
-                "lmstudio_base_url": self.llm_base_url or "http://localhost:1234/v1",
+                "model": self.llm_model or "gpt-4o-mini",
+                "openai_base_url": self.llm_base_url or "http://localhost:1/v1",
                 "temperature": self.llm_temperature,
             },
         }
