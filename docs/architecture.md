@@ -18,6 +18,10 @@ How Parousia's components fit together and what happens when things happen.
   parousia-guard   │ (stdio)        │                                    │
   serve --mcp      │                │                                    │
                    │                │                                    │
+  Remote agents ──→│ MCP SSE :8081  │                                    │
+  (HTTP SSE)       │ /sse           │                                    │
+                   │ /messages/     │                                    │
+                   │                │                                    │
                    │  ┌──────────────┤                                    │
                    │  │  REST API    │←───────────────────────────────────┘
                    │  │  :8080       │
@@ -25,8 +29,9 @@ How Parousia's components fit together and what happens when things happen.
                    │  │              │  /dashboard /approval/*
                    │  │              │  /onboarding /account/*
                    │  ├──────────────┤
-                   │  │  MCP Server  │  Stdio transport (spawned per-agent)
-                   │  │  (stdio)     │  11 tools (email ×2, temp ×6, spatial ×3)
+                   │  │  MCP Server  │  Stdio (spawned per-agent)
+                   │  │  (stdio/SSE) │  SSE (:8081) for remote agents
+                   │  │              │  11 tools (email ×2, temp ×6, spatial ×3)
                    │  ├──────────────┤
                    │  │  Auth        │  bcrypt API key validation
                    │  │  Middleware  │  AccountStore → tier/permissions
@@ -41,6 +46,10 @@ How Parousia's components fit together and what happens when things happen.
                    │  │  Spatial     │  Playwright → per-agent Chromium
                    │  │  Engine      │  SDOM serializer, browser pool
                    │  ├──────────────┤
+                   │  │  Memory      │  Mem0 recorder: 16 formatters
+                   │  │  Engine      │  Circuit breaker, fire-and-forget
+                   │  │              │  ──writes──→ Qdrant :6333
+                   │  ├──────────────┤
                    │  │  Account     │  SQLite: accounts + api_key_events
                    │  │  Store       │  bcrypt hashing, tier management
                    │  ├──────────────┤
@@ -49,6 +58,7 @@ How Parousia's components fit together and what happens when things happen.
                    │  └──────────────┤
                    │                 │
                    │  Redis :6379    │  Rate-limit counters
+                   │  Qdrant :6333   │  Vector store (mem0 collection)
                    └─────────────────┘
 ```
 
@@ -56,21 +66,21 @@ How Parousia's components fit together and what happens when things happen.
 
 ## Transport model
 
-Parousia has two server processes, started from the same `parousia-guard serve` entry point:
+Parousia has three transport modes, started from the same `parousia-guard serve` entry point:
 
 | Server | How it runs | Transport | Port |
 |--------|-----------|-----------|------|
 | **REST** | Systemd daemon (`parousia-guard serve --rest`) | HTTP | 127.0.0.1:8080 |
-| **MCP** | Per-agent subprocess (`parousia-guard serve --mcp`) | Stdio (stdin/stdout) | None |
+| **MCP (stdio)** | Per-agent subprocess (`parousia-guard serve --mcp`) | Stdio (stdin/stdout) | None |
+| **MCP (SSE)** | Long-running daemon (`parousia-guard serve --mcp-sse`) | HTTP SSE | 0.0.0.0:8081 |
 
 The REST server runs continuously as a systemd service. It handles health checks, email ingest from Postfix, metrics, onboarding, and account management.
 
-The MCP server is **spawned on demand** by each agent — the agent's host runs `parousia-guard serve --mcp` as a subprocess and communicates via stdin/stdout using the MCP JSON-RPC protocol. This means:
-- No network port needed for MCP
-- Each agent gets its own MCP session with its own browser profile, DB connection, and auth context
-- MCP processes are short-lived (one per agent session) and exit when the agent disconnects
+The MCP stdio server is **spawned on demand** by each agent — the agent's host runs `parousia-guard serve --mcp` as a subprocess and communicates via stdin/stdout using the MCP JSON-RPC protocol.
 
-Both servers share the same codebase, same config file, same database files, and same Redis instance. REST and MCP read/write to the same InboxStore, TemporalDB, AccountStore, and BrowserPool.
+The MCP SSE server runs as a **persistent daemon** bound to a public port. Remote agents connect via HTTP SSE at `/sse` and post messages to `/messages/`. This is the transport used for multi-agent deployments where agents run on separate hosts (AWS VMs, lab machines).
+
+All three servers share the same codebase, same config file, same database files, and same Redis + Qdrant instances.
 
 ---
 
@@ -118,6 +128,24 @@ Every MCP and REST request (except `/health` and `/onboarding`) goes through:
 5. All downstream operations scope by `account_id`
 
 Config-based agents (`config.yaml` → `agents:`) are a fallback when no auth header is present. This preserves backward compatibility for local dev.
+
+### Memory Engine ↔ MCP Server
+
+**Direction:** MCP Server → Memory Engine (write only, fire-and-forget)
+
+Every write-side tool call in `handle_call_tool()` triggers a memory record:
+
+1. Tool dispatches normally (e.g., `schedule_event` → TemporalDB)
+2. Result returned to agent immediately
+3. On a **daemon thread**: `MemoryRecorder.record_tool_call(tool_name, arguments, result, agent_id)`
+4. Fact formatter converts tool call → natural language sentence
+5. Sentence written to Mem0 → Qdrant (vector) + history DB (SQLite)
+
+**Circuit breaker:** 5 consecutive Mem0 failures → circuit opens for 120s. All writes are silently skipped. Tool calls never block on memory.
+
+**Skipped tools:** `get_temporal_context`, `extract_page_state` (read-only). Failed tool calls are also skipped — only successful write-side actions are recorded.
+
+**Key property:** If Qdrant is down, every tool call still works. The circuit breaker ensures memory failures never degrade agent functionality. Facts resume recording automatically when Qdrant recovers.
 
 ---
 
@@ -220,6 +248,59 @@ Config-based agents (`config.yaml` → `agents:`) are a fallback when no auth he
    → SDOM JSON with meta, interactive_elements, content_sections
 ```
 
+## Life of a Memory write
+
+```
+1. Agent calls any write-side tool via MCP
+   → e.g., schedule_event, send_email, browse_to, nominate_milestone
+
+2. MCP server dispatches tool normally
+   → TemporalToolHandlers._handle_schedule_event(args, agent_id)
+   → Event inserted into TemporalDB
+   → Result JSON returned to agent immediately (agent unblocked)
+
+3. On daemon thread: _record_to_mem0()
+   → try: memory_recorder.record_tool_call(name, args, result, agent_id)
+   → except: pass  (never block the agent)
+
+4. Circuit breaker check
+   → breaker open? → skip, return immediately (<1ms)
+   → breaker closed? → continue
+
+5. Fact formatter
+   → _FACT_FORMATTERS["schedule_event"](args, result, agent_id)
+   → Returns: 'Scheduled "Deploy v0.3.0" for 2026-06-27T14:00:00Z (medium flexibility).'
+
+6. Fire-and-forget write
+   → Join previous thread if still running (timeout 5s)
+   → Spawn new daemon thread: _write()
+     → mem0.Memory.from_config()
+     → memory.add([{"role": "user", "content": fact}],
+                   user_id="parousia-hermes",
+                   agent_id="parousia",
+                   infer=False)
+     → Mem0 embeds fact via fastembed (BAAI/bge-small-en-v1.5, 384-dim)
+     → Writes to Qdrant :6333 collection "mem0"
+     → Writes to SQLite history DB
+
+7. Fact is now searchable
+   → Agent: mem0_search("deployment events")
+   → Qdrant vector search returns fact with score
+   → Cross-agent: other agents query Qdrant by user_id filter
+```
+
+### Circuit breaker lifecycle
+
+```
+  CLOSED ──5 consecutive failures──→ OPEN (120s cooldown)
+    ↑                                     │
+    │                                     │
+    └─────first write succeeds─────← 120s elapsed (half-open)
+    
+  While OPEN: all record_tool_call() calls return immediately.
+  Tool dispatch continues unaffected.
+```
+
 ---
 
 ## Database layout
@@ -231,7 +312,9 @@ All databases are SQLite files in `/var/lib/parousia/` (configurable):
 ├── temporal.db       # events + journal tables
 ├── accounts.db        # accounts + api_key_events tables
 ├── inbox.db           # inbox_messages table (or data/inbox.db)
-└── browsers/          # per-agent Chromium profile directories
+├── mem0_history.db    # Mem0 audit log (SQLite)
+├── browsers/          # per-agent Chromium profile directories
+└── mem0/              # Qdrant vector storage (if using local file-backed Qdrant)
 ```
 
 ---
@@ -274,6 +357,9 @@ spatial:
   profile_dir: /var/lib/parousia/browsers
   idle_timeout_seconds: 300
   max_instances: 10
+
+# Memory config is in a separate file: /etc/parousia/mem0.yaml
+# See docs/capabilities/memory.md for the full schema.
 
 approval:
   enabled: false
