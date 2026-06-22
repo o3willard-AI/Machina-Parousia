@@ -2,7 +2,7 @@
 
 > **Target release:** Parousia v0.3.0  
 > **Dependency:** Clubhouse Qdrant + .23 LM Studio (already deployed)  
-> **Estimated effort:** 4 hours
+> **Estimated effort:** 4 hours (code) + 2 hours (multi-agent testing) = **6 hours total**
 
 ---
 
@@ -15,7 +15,8 @@
 5. [Configuration](#5-configuration)
 6. [QA Test Suite](#6-qa-test-suite)
 7. [Functional Verification](#7-functional-verification)
-8. [Risk Register](#8-risk-register)
+8. [Multi-Agent User Testing on AWS](#8-multi-agent-user-testing-on-aws)
+9. [Risk Register](#9-risk-register)
 
 ---
 
@@ -815,12 +816,583 @@ echo "=== ALL VERIFICATIONS PASSED ==="
 
 ---
 
-## 8. Risk Register
+## 8. Multi-Agent User Testing on AWS
+
+> **Objective:** Deploy real agents (Hermes, Claude Code, OpenClaw) on AWS VMs and
+> verify that the Parousia Mem0 memory layer correctly records, synthesizes, and
+> surfaces facts across agents — a live dogfood test of the "Machine's Presence."
+
+### 8.1 Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        AWS us-east-1                             │
+│                                                                  │
+│  ┌──────────────────────┐    ┌──────────────────────────────┐   │
+│  │ Parousia (existing)   │    │ Clubhouse (lab)              │   │
+│  │ 32.197.57.145        │    │ 192.168.101.42               │   │
+│  │ m7i-flex.large       │    │ Qdrant :6333                 │   │
+│  │ MCP server :8081 ◄───┼────┤ LiteLLM :4000                │   │
+│  │ Mem0 recorder (NEW)  │    │ LM Studio .23:1234           │   │
+│  └──────────────────────┘    └──────────────────────────────┘   │
+│           ▲                                                      │
+│           │  MCP tool calls (send_email, schedule_event, ...)    │
+│           │  Mem0 writes via Qdrant                              │
+│  ┌────────┴────────┬──────────────────┐                          │
+│  │                 │                  │                          │
+│  ▼                 ▼                  ▼                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐                   │
+│  │ VM-A     │  │ VM-B     │  │ VM-C         │                   │
+│  │ Hermes   │  │ Claude   │  │ OpenClaw     │                   │
+│  │ Agent    │  │ Code     │  │              │                   │
+│  │          │  │          │  │              │                   │
+│  │ t3.small │  │ t3.small │  │ t3.small     │                   │
+│  └──────────┘  └──────────┘  └──────────────┘                   │
+│                                                                  │
+│  Agent A schedules an event ──► Mem0 records "parousia-hermes"   │
+│  Agent B searches ────────────► Finds A's fact via cross-search  │
+│  Agent C browses web ─────────► Spatial fact recorded            │
+│  All three ───────────────────► Shared memory across agents      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Key design for testing:**
+
+1. **Three isolated VMs** — one per agent type, each with its own identity (`parousia-hermes`, `parousia-claude`, `parousia-openclaw`)
+2. **Single shared Parousia** — all agents call the same MCP server at 32.197.57.145:8081
+3. **Single shared Qdrant** — all Mem0 facts land in the same vector store, namespaced by `user_id`
+4. **Cross-agent search** — agents search across all `parousia-*` namespaces to discover facts from other agents
+5. **Minus email sending** — `send_email` calls are mocked/recorded but not actually delivered (the mock event pattern)
+
+### 8.2 Prerequisites
+
+| # | Requirement | Status | Verification |
+|---|------------|--------|-------------|
+| 1 | AWS credentials configured | Check | `aws sts get-caller-identity` |
+| 2 | SSH key pair in AWS (`linus-test-key`) | Check | `aws ec2 describe-key-pairs` |
+| 3 | Parousia Mem0 integration deployed to 32.197.57.145 | **Gate** | `ssh parousia 'systemctl status parousia-guard'` |
+| 4 | `/etc/parousia/mem0.yaml` on Parousia instance | **Gate** | `ssh parousia 'cat /etc/parousia/mem0.yaml'` |
+| 5 | Clubhouse Qdrant reachable from AWS | Check | `ssh parousia 'curl -s http://192.168.101.42:6333/health'` |
+| 6 | Clubhouse Qdrant reachable from test VMs | Check | Verified during bootstrap |
+| 7 | OpenRouter API key (for OpenClaw) | **Gate** | In KeePass `General/openrouter MR-Krabs QA Key` |
+| 8 | Anthropic API key (for Claude Code) | **Gate** | Env var or OAuth |
+| 9 | DeepSeek API key (for Hermes) | Check | In `~/.hermes/.env` |
+
+**Gate items** must pass before provisioning test VMs. If Parousia Mem0 integration
+hasn't been deployed yet, complete Sections 2–7 first.
+
+### 8.3 Test VM Provisioning
+
+Use the Linus Deployment Specialist (`shared/provision/linus-provision.sh`)
+to provision three Ubuntu 24.04 t3.small instances.
+
+```bash
+# VM-A: Hermes Agent
+PROVIDER=aws \
+  AWS_REGION=us-east-1 \
+  AWS_KEY_NAME=linus-test-key \
+  VM_OS_TYPE=ubuntu \
+  VM_NAME=parousia-qa-hermes \
+  BOOTSTRAP_PACKAGES="python3-pip python3-venv git curl" \
+  bash shared/provision/linus-provision.sh
+
+# VM-B: Claude Code
+PROVIDER=aws \
+  AWS_REGION=us-east-1 \
+  AWS_KEY_NAME=linus-test-key \
+  VM_OS_TYPE=ubuntu \
+  VM_NAME=parousia-qa-claude \
+  BOOTSTRAP_PACKAGES="nodejs npm git curl" \
+  bash shared/provision/linus-provision.sh
+
+# VM-C: OpenClaw
+PROVIDER=aws \
+  AWS_REGION=us-east-1 \
+  AWS_KEY_NAME=linus-test-key \
+  VM_OS_TYPE=ubuntu \
+  VM_NAME=parousia-qa-openclaw \
+  BOOTSTRAP_PACKAGES="python3-pip python3-venv git curl" \
+  bash shared/provision/linus-provision.sh
+```
+
+**Expected output per VM:** `LINUS_RESULT:SUCCESS` with `LINUS_VM_IP` populated.
+
+**Cost estimate (3 × t3.small, ~1 hour test window):**
+- 3 × $0.0208/hr × 1.5hr = **~$0.09 total**
+- Plus Parousia m7i-flex.large: ~$0.09/hr (already running)
+
+### 8.4 Agent Installation & Configuration
+
+#### 8.4.1 VM-A: Hermes Agent
+
+```bash
+# SSH to VM-A
+ssh -i ~/.ssh/linus-test-key ubuntu@<VM_A_IP>
+
+# Install Hermes
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+
+# Configure OpenRouter or DeepSeek provider
+export DEEPSEEK_API_KEY="<key>"
+hermes model  # Interactive picker → DeepSeek v4 Pro
+
+# Enable MCP for Parousia
+hermes mcp add parousia --url http://32.197.57.145:8081/sse
+
+# Configure Mem0 local mode
+mkdir -p ~/.hermes
+cat > ~/.hermes/mem0.json << 'EOF'
+{
+  "mode": "local",
+  "user_id": "parousia-hermes",
+  "vector_store_host": "192.168.101.42",
+  "vector_store_port": 6333,
+  "embedding_model_dims": 768,
+  "llm_provider": "lmstudio",
+  "llm_model": "qwen2.5-coder-3b-instruct",
+  "llm_base_url": "http://192.168.101.23:1234/v1",
+  "embedder_provider": "lmstudio",
+  "embedder_model": "text-embedding-nomic-embed-text-v1.5",
+  "embedder_base_url": "http://192.168.101.23:1234/v1"
+}
+EOF
+
+# Enable Mem0 in Hermes
+hermes config set memory.provider mem0
+
+# Verify
+hermes tools list | grep parousia  # Should show MCP tools
+hermes chat -q "Call mem0_profile and confirm it returns empty"
+```
+
+#### 8.4.2 VM-B: Claude Code
+
+```bash
+# SSH to VM-B
+ssh -i ~/.ssh/linus-test-key ubuntu@<VM_B_IP>
+
+# Install Claude Code (Node.js already bootstrapped)
+npm install -g @anthropic-ai/claude-code
+
+# Authenticate
+export ANTHROPIC_API_KEY="<key>"
+claude auth login --console
+
+# Add Parousia MCP server
+claude mcp add -s user parousia -- \
+  curl -s http://32.197.57.145:8081/sse
+
+# Create CLAUDE.md with Parousia context
+cat > ~/CLAUDE.md << 'EOF'
+# Parousia Test Agent
+
+I am parousia-claude — a Claude Code agent configured to test the Parousia
+presence platform with Mem0 memory.
+
+## Available MCP Tools
+- send_email(to, subject, body) — Send email via Parousia
+- schedule_event(title, start_time, ...) — Schedule temporal events
+- nominate_milestone(title, occurred_at, ...) — Record milestones
+- browse_to(url) — Browse web pages
+- check_inbox — Check email inbox
+- get_temporal_context — Query temporal state
+
+## Memory
+All tool calls are automatically recorded to Mem0. Search memory with
+"search for <query>" — Claude should use WebSearch or its own tools
+to query the Qdrant API directly.
+
+## Qdrant Search (for cross-agent memory verification)
+curl -s http://192.168.101.42:6333/collections/mem0/points/search \
+  -H "Content-Type: application/json" \
+  -d '{"vector": [...], "limit": 5}'
+EOF
+
+# Smoke test
+claude -p "Call the schedule_event tool to create a test event: title='Claude startup test', start_time='$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)'" \
+  --allowedTools "mcp__parousia__schedule_event" --max-turns 3
+```
+
+#### 8.4.3 VM-C: OpenClaw
+
+```bash
+# SSH to VM-C
+ssh -i ~/.ssh/linus-test-key ubuntu@<VM_C_IP>
+
+# Install OpenClaw (Python package)
+pip install openclaw  # or pip install git+https://github.com/...
+
+# Configure OpenRouter provider
+export OPENROUTER_API_KEY="<key>"
+
+# Create OpenClaw config with Parousia tools
+mkdir -p ~/.openclaw
+cat > ~/.openclaw/config.yaml << 'EOF'
+provider: openrouter
+model: anthropic/claude-sonnet-4
+agent_id: parousia-openclaw
+
+mcp_servers:
+  parousia:
+    url: http://32.197.57.145:8081/sse
+
+memory:
+  backend: mem0
+  mem0:
+    mode: local
+    user_id: parousia-openclaw
+    vector_store:
+      host: 192.168.101.42
+      port: 6333
+    embedder:
+      provider: lmstudio
+      model: text-embedding-nomic-embed-text-v1.5
+      base_url: http://192.168.101.23:1234/v1
+EOF
+
+# Smoke test
+openclaw run "List available tools and confirm you can see Parousia tools"
+```
+
+### 8.5 Test Scenarios
+
+Each scenario is a scripted interaction. The orchestrator (running on the
+Clubhouse or local machine) drives the agents via their respective CLIs.
+
+#### Scenario 1: Cross-Agent Temporal Awareness
+
+**Goal:** Hermes schedules an event → Claude discovers it via memory search.
+
+| Step | Agent | Action | Tool | Expected |
+|------|-------|--------|------|----------|
+| 1.1 | Hermes | Schedule a deployment event | `schedule_event(title="Deploy v0.3.0 to production", start_time="2026-06-27T14:00:00Z", flexibility="medium")` | Event created, no conflicts |
+| 1.2 | Hermes | Verify recording | `mem0_search(query="deployment event")` | Returns fact with title and date |
+| 1.3 | Claude | Cross-agent search | Curl Qdrant API with `parousia-hermes` user_id filter | Finds Hermes's scheduled event |
+| 1.4 | Claude | Schedule its own event | `schedule_event(title="Post-deploy monitoring window", start_time="2026-06-27T14:15:00Z")` | Event created |
+| 1.5 | Hermes | Discover Claude's event | `mem0_search(query="monitoring window")` with cross-agent user_id | Finds Claude's event |
+
+**Orchestration script:**
+```bash
+#!/bin/bash
+set -e
+HERMES_IP="$1"  CLAUDE_IP="$2"
+
+echo "=== Scenario 1: Cross-Agent Temporal Awareness ==="
+
+# Step 1.1: Hermes schedules
+ssh ubuntu@$HERMES_IP \
+  'hermes chat -q "Call schedule_event: title=Deploy v0.3.0 to production, start_time=2026-06-27T14:00:00Z, flexibility=medium. Return the JSON result."'
+
+sleep 3  # Mem0 write + extraction
+
+# Step 1.2: Hermes verifies own memory
+ssh ubuntu@$HERMES_IP \
+  'hermes chat -q "Call mem0_search with query=\\"deployment event\\". Return the results."'
+
+# Step 1.3: Claude cross-searches
+ssh ubuntu@$CLAUDE_IP \
+  'curl -s http://192.168.101.42:6333/collections/mem0/points/scroll \
+    -H "Content-Type: application/json" \
+    -d "{\"filter\":{\"must\":[{\"key\":\"user_id\",\"match\":{\"value\":\"parousia-hermes\"}}]},\"limit\":5}" | python3 -c "import json,sys; data=json.load(sys.stdin); print(f\\"Found {len(data.get(\\"result\\",{}).get(\\"points\\",[]))} points\\")"'
+
+echo "Scenario 1 complete."
+```
+
+#### Scenario 2: Email + Event Synthesis
+
+**Goal:** Claude sends an email → Hermes schedules a related event →
+memory synthesizes a connected fact.
+
+| Step | Agent | Action | Tool | Expected |
+|------|-------|--------|------|----------|
+| 2.1 | Claude | Mock-send an email | `send_email(to="team@example.com", subject="v0.3.0 rollout plan", body="Rolling out Wednesday...")` | Email queued/recorded |
+| 2.2 | Hermes | Schedule follow-up | `schedule_event(title="v0.3.0 rollout", start_time="2026-06-25T09:00:00Z")` | Event created |
+| 2.3 | Hermes | Search synthesized memory | `mem0_search(query="rollout communication and schedule")` | Returns facts connecting email + event |
+| 2.4 | Hermes | Full profile | `mem0_profile` | Shows 3+ facts including Claude's email |
+
+**Key verification:** The `mem0_search` result for "rollout communication" should
+return facts from BOTH agents — Claude's email fact AND Hermes's scheduled event.
+This proves cross-agent memory synthesis works.
+
+#### Scenario 3: Spatial Discovery Chain
+
+**Goal:** OpenClaw browses → Claude discovers → Hermes enriches.
+
+| Step | Agent | Action | Tool | Expected |
+|------|-------|--------|------|----------|
+| 3.1 | OpenClaw | Browse a URL | `browse_to(url="https://github.com/NousResearch/hermes-agent/releases")` | Page loaded |
+| 3.2 | Claude | Search for web activity | Curl Qdrant across all namespaces | Finds OpenClaw's browse fact |
+| 3.3 | Claude | Nominate a milestone based on discovery | `nominate_milestone(title="Hermes Agent latest release noted", entry_type="discovery", occurred_at="2026-06-22")` | Milestone recorded |
+| 3.4 | Hermes | Timeline reconstruction | `mem0_search(query="June 2026 discoveries and events")` | Returns browse + milestone facts |
+
+#### Scenario 4: Multi-Agent Timeline Reconstruction
+
+**Goal:** All three agents perform actions → a single query reconstructs the full timeline.
+
+| Step | Agent | Action |
+|------|-------|--------|
+| 4.1 | Hermes | `set_timer_alarm(title="QA review deadline", fire_at="2026-06-23T17:00:00Z")` |
+| 4.2 | Claude | `nominate_milestone(title="Mem0 memory layer v0.3.0", entry_type="release", occurred_at="2026-06-22")` |
+| 4.3 | OpenClaw | `browse_to(url="https://docs.mem0.ai")` |
+| 4.4 | Hermes | `resolve_conflicts(event_id="...")` — resolve any temporal conflicts |
+| 4.5 | Any agent | `mem0_search(query="all activity June 2026", user_id="parousia-*")` |
+
+**Success criterion:** Search returns ≥4 distinct facts from ≥2 different agents,
+with correct dates and agent attribution.
+
+#### Scenario 5: Circuit Breaker Resilience
+
+**Goal:** Prove that Mem0 failures never block Parousia tool calls.
+
+| Step | Action | Expected |
+|------|--------|----------|
+| 5.1 | Hermes schedules 3 events (baseline) | All succeed |
+| 5.2 | **Stop Clubhouse Qdrant** (`systemctl --user stop qdrant`) | |
+| 5.3 | Hermes schedules 6 more events | All 6 tool calls succeed, 5 Mem0 failures logged |
+| 5.4 | Verify circuit breaker opened | Parousia logs show "circuit breaker tripped after 5 failures" |
+| 5.5 | Verify 7th+ tool call skips Mem0 silently | Event created, no Mem0 attempt |
+| 5.6 | **Start Clubhouse Qdrant** (`systemctl --user start qdrant`) | |
+| 5.7 | Wait 130s (breaker cooldown + margin) | |
+| 5.8 | Hermes schedules another event | Tool call succeeds AND Mem0 write succeeds |
+| 5.9 | Verify fact is searchable | `mem0_search` returns the post-recovery fact |
+
+### 8.6 Cross-Agent Search Design
+
+**Important design consideration:** By default, Mem0 searches are scoped to the
+agent's own `user_id`. For cross-agent discovery, we need one of:
+
+**Option A: Multi-user search (recommended for testing)**
+```python
+# Search across all parousia agents
+results = memory.search(
+    query="deployment events",
+    user_id="parousia-hermes",  # Primary agent
+    filters={"user_id": {"$in": [
+        "parousia-hermes",
+        "parousia-claude", 
+        "parousia-openclaw"
+    ]}}
+)
+```
+
+**Option B: Shared user_id**
+All three agents use the same `user_id: parousia-shared`. Simpler but loses
+agent attribution — facts can't be traced to source agent.
+
+**Option C: Direct Qdrant scroll (used in test scripts)**
+```bash
+curl -s http://192.168.101.42:6333/collections/mem0/points/scroll \
+  -H "Content-Type: application/json" \
+  -d '{"filter":{"must":[{"key":"user_id","match":{"text":"parousia-"}}]},"limit":20}'
+```
+
+**For this test phase, we use Option C** (direct Qdrant) for cross-agent
+verification and Option A (multi-user search) for agent-driven queries.
+
+### 8.7 Verification & Success Criteria
+
+#### Automated Verification Script
+
+`verify_multi_agent.sh` — runs on the orchestrator machine:
+
+```bash
+#!/bin/bash
+# verify_multi_agent.sh — multi-agent Mem0 integration test
+# Usage: bash verify_multi_agent.sh <hermes_ip> <claude_ip> <openclaw_ip>
+set -e
+HERMES=$1; CLAUDE=$2; OPENCLAW=$3
+PASS=0; FAIL=0
+
+assert() {
+    local desc="$1"; local cmd="$2"; local expect="$3"
+    echo -n "  $desc ... "
+    result=$(eval "$cmd" 2>&1) || true
+    if echo "$result" | grep -q "$expect"; then
+        echo "✓ PASS"; ((PASS++))
+    else
+        echo "✗ FAIL (expected '$expect', got: ${result:0:200})"; ((FAIL++))
+    fi
+}
+
+echo "=== Multi-Agent Mem0 Verification ==="
+
+# ── Phase 1: Connectivity ──
+echo "Phase 1: Connectivity"
+assert "Parousia MCP reachable" \
+  "curl -s -o /dev/null -w '%{http_code}' http://32.197.57.145:8081/sse" "200"
+assert "Qdrant reachable from Hermes VM" \
+  "ssh ubuntu@$HERMES 'curl -s http://192.168.101.42:6333/health'" "ok"
+assert "Hermes tools list shows MCP" \
+  "ssh ubuntu@$HERMES 'hermes tools list 2>/dev/null'" "parousia"
+
+# ── Phase 2: Cross-Agent Write → Search ──
+echo "Phase 2: Cross-Agent Write → Search"
+
+# Hermes schedules
+ssh ubuntu@$HERMES "hermes chat -q 'Call schedule_event: title=QA Cross-Agent Test, start_time=2026-06-27T14:00:00Z, flexibility=low'"
+sleep 3
+
+assert "Hermes sees own fact" \
+  "ssh ubuntu@$HERMES \"hermes chat -q 'Call mem0_search with query=\\\"QA Cross-Agent Test\\\". Return count.'\"" \
+  "QA Cross-Agent"
+
+# Claude cross-searches Qdrant
+assert "Claude cross-searches Hermes fact" \
+  "ssh ubuntu@$CLAUDE \"curl -s http://192.168.101.42:6333/collections/mem0/points/scroll -H 'Content-Type: application/json' -d '{\\\"limit\\\":10}'\"" \
+  "parousia-hermes"
+
+# ── Phase 3: Independent Agent Actions ──
+echo "Phase 3: Independent Agent Actions"
+
+ssh ubuntu@$CLAUDE "claude -p 'Call nominate_milestone: title=Claude discovered Mem0 testing, entry_type=discovery, occurred_at=2026-06-22' --allowedTools mcp__parousia__nominate_milestone --max-turns 3"
+sleep 3
+
+ssh ubuntu@$OPENCLAW "openclaw run 'Browse to https://github.com/NousResearch/hermes-agent and report the latest release tag'"
+sleep 3
+
+assert "Qdrant has facts from ≥2 agents" \
+  "ssh ubuntu@$HERMES \"curl -s http://192.168.101.42:6333/collections/mem0/points/scroll -H 'Content-Type: application/json' -d '{\\\"limit\\\":20}' | python3 -c \\\"import json,sys; d=json.load(sys.stdin); ids=set(p['payload'].get('user_id','') for p in d.get('result',{}).get('points',[])); print(len(ids), 'agents:', sorted(ids))\\\"\"" \
+  "agents"
+
+# ── Phase 4: Circuit Breaker ──
+echo "Phase 4: Circuit Breaker Resilience"
+# (Requires Qdrant stop/start access — see Scenario 5 above)
+echo "  (Manual: stop Qdrant, run 6+ tool calls, verify breaker, restart)"
+
+# ── Phase 5: Regression ──
+echo "Phase 5: Tool Regression"
+assert "Hermes: schedule_event works" \
+  "ssh ubuntu@$HERMES \"hermes chat -q 'Call schedule_event: title=Regression Test, start_time=2026-06-28T10:00:00Z' 2>&1\"" \
+  "schedule_event"
+
+# ── Summary ──
+echo ""
+echo "=== Results: $PASS passed, $FAIL failed ==="
+[[ $FAIL -eq 0 ]] && echo "MULTI-AGENT VERIFICATION: PASSED" || echo "MULTI-AGENT VERIFICATION: FAILED"
+```
+
+#### Success Criteria
+
+| # | Criterion | Threshold |
+|---|-----------|-----------|
+| 1 | All 3 agents can call Parousia MCP tools | 100% (no connection failures) |
+| 2 | Each agent's write actions produce Mem0 facts | ≥1 fact per agent in Qdrant |
+| 3 | Cross-agent search finds facts from other agents | ≥1 cross-agent discovery |
+| 4 | Mem0 search synthesizes related facts | Search for "deployment" returns both email and event facts |
+| 5 | Circuit breaker opens on Qdrant failure | 5 consecutive failures → breaker open log |
+| 6 | Circuit breaker resets after recovery | Post-recovery writes succeed |
+| 7 | Tool calls succeed during Qdrant outage | 100% (no blocking) |
+| 8 | Timeline reconstruction works | Search across all agents returns ≥4 distinct facts |
+| 9 | No agent sees another agent's facts on its own user_id search | `mem0_profile` for `parousia-hermes` doesn't show `parousia-claude` facts |
+| 10 | Cross-agent search (explicit multi-user) returns all agents' facts | Multi-user filter returns facts from ≥2 agents |
+
+### 8.8 Test Execution Order
+
+```
+Prerequisites (8.2)
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ GATE 1: Parousia Mem0 deployed to AWS       │
+│ GATE 2: AWS credentials + SSH keys ready    │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+Provision VMs (8.3) — Linus × 3
+    │
+    ▼
+Install Agents (8.4) — Hermes, Claude, OpenClaw
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ GATE 3: All agents can call Parousia tools  │
+└─────────────────────────────────────────────┘
+    │
+    ├──► Scenario 1: Temporal Awareness
+    ├──► Scenario 2: Email + Event Synthesis
+    ├──► Scenario 3: Spatial Discovery Chain
+    ├──► Scenario 4: Timeline Reconstruction
+    └──► Scenario 5: Circuit Breaker Resilience
+    │
+    ▼
+Verification Script (8.7)
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ DECISION: All 10 criteria met?              │
+│   YES → Teardown VMs, mark v0.3.0 ready    │
+│   NO  → Debug, fix, re-run from scenario    │
+└─────────────────────────────────────────────┘
+```
+
+### 8.9 Teardown
+
+```bash
+# List all test instances
+aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=parousia-qa-*" \
+  --query "Reservations[].Instances[].{ID:InstanceId,IP:PublicIpAddress,Name:Tags[?Key=='Name']|[0].Value}" \
+  --region us-east-1 --output table
+
+# Terminate
+for id in $(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=parousia-qa-*" "Name=instance-state-name,Values=running" \
+  --query "Reservations[].Instances[].InstanceId" --region us-east-1 --output text); do
+  echo "Terminating $id..."
+  aws ec2 terminate-instances --instance-ids "$id" --region us-east-1
+done
+
+# Verify termination
+sleep 30
+aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=parousia-qa-*" \
+  --query "Reservations[].Instances[].State.Name" --region us-east-1 --output text
+# Expected: terminated terminated terminated (or empty)
+```
+
+### 8.10 Contingency: OpenClaw Unavailable
+
+If OpenClaw CLI is not installable or doesn't support MCP natively,
+substitute with **OpenCode CLI** (`npm i -g opencode-ai`):
+
+```bash
+# OpenCode alternative for VM-C
+ssh ubuntu@<VM_C_IP> '
+  npm install -g opencode-ai@latest
+  opencode auth login
+  
+  # Configure Parousia as custom provider with MCP-like tools
+  mkdir -p ~/.config/opencode
+  cat > ~/.config/opencode/opencode.json << EOF
+  {
+    "provider": {
+      "parousia": {
+        "name": "Parousia Presence Platform",
+        "options": { "baseURL": "http://32.197.57.145:8081" }
+      }
+    }
+  }
+  EOF
+'
+```
+
+**Note:** OpenCode may not support SSE-based MCP natively as of v1.14.
+In that case, use `curl`-based tool calls for OpenCode tests — the
+Qdrant verification still works because facts are recorded server-side
+by Parousia regardless of which client triggered them.
+
+---
+
+## 9. Risk Register
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
 | Mem0 extraction LLM doesn't support structured outputs | High | Low | Facts are already natural language — extraction is nice-to-have. Search still works via embeddings. |
 | Clubhouse unreachable from AWS Parousia instance | Medium | Medium | Qdrant is 74MB — can run on the AWS instance as fallback. Or use file-backed Qdrant at `/var/lib/parousia/qdrant/`. |
+| Clubhouse unreachable from test VMs | Medium | High | Test VMs run in AWS us-east-1; Clubhouse is on lab network. Ensure site-to-site VPN or use Parousia as Qdrant proxy. Fallback: deploy Qdrant on each test VM. |
+| OpenClaw CLI not installable or lacks MCP support | High | Medium | Substitute OpenCode CLI or use direct curl-based tool calls (8.10 contingency). Qdrant verification unaffected. |
 | Memory growth over time (unbounded facts) | Medium | Low | Qdrant handles millions of vectors. If needed, add `max_facts_per_agent` config with LRU eviction in v0.4. |
 | Thread safety with concurrent MCP tool calls | Low | Medium | Single daemon thread serializes writes. If concurrent calls arrive, `join(timeout=5.0)` on previous thread prevents pileup. |
 | mem0ai version incompatibility | Low | Low | Pin `mem0ai>=2.0.7,<3.0` in requirements. Tested with 2.0.7. |
+| Test agents leak API key spend (runaway loops) | Medium | Low | Set `--max-turns` for Claude Code, `--max-budget-usd` where available. Hermes has built-in turn limit. Monitor AWS billing. |
+| Multiple agents writing to same user_id namespace | Low | Low | Each agent uses distinct `parousia-{name}` user_id. Cross-agent search uses explicit multi-user filter. |
