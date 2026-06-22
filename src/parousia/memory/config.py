@@ -66,15 +66,15 @@ class Mem0Config:
                 },
             }
 
-        # LLM config — only if provider is set (skip for embed-only mode)
-        if self.llm_provider:
-            config["llm"] = {
-                "provider": self.llm_provider,
-                "config": {
-                    "model": self.llm_model,
-                    "lmstudio_base_url": self.llm_base_url,
-                    "temperature": self.llm_temperature,
-                },
-            }
+        # LLM config — always provide one to prevent OpenAI default
+        # When llm_provider is empty, use a disabled placeholder
+        config["llm"] = {
+            "provider": self.llm_provider or "none",
+            "config": {
+                "model": self.llm_model or "disabled",
+                "lmstudio_base_url": self.llm_base_url or "http://localhost:1234/v1",
+                "temperature": self.llm_temperature,
+            },
+        }
 
         return config
