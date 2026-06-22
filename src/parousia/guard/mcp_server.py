@@ -18,6 +18,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
+from parousia.memory.recorder import MemoryRecorder
 from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Mount, Route
@@ -86,6 +87,9 @@ def _build_server() -> Server:
     # Initialize inbox store for check_inbox MCP tool (Story F)
     from parousia.inbox.inbox_store import InboxStore
     inbox_store = InboxStore()
+
+    # Initialize memory recorder for tool call logging
+    memory_recorder = MemoryRecorder()
 
     # ── Phase 1 + Phase 2 tool listing ───────────────
 
@@ -160,7 +164,15 @@ def _build_server() -> Server:
 
         # ── Phase 1: send_email ────────────────────
         if name == "send_email":
-            return await _handle_send_email(arguments, config, rate_limiter, redis_client)
+            result_content = await _handle_send_email(arguments, config, rate_limiter, redis_client)
+            try:
+                memory_recorder.record_tool_call(
+                    "send_email", arguments,
+                    json.loads(result_content[0].text), agent_id
+                )
+            except Exception:
+                pass
+            return result_content
 
         agent_id = agent_id_override or _resolve_agent_id(config, arguments)
 
@@ -182,26 +194,38 @@ def _build_server() -> Server:
                     "archived": msg.archived,
                     "body_preview": msg.body_text[:200],
                 })
-            return [TextContent(
+            result_dict = {"messages": result_data, "count": len(result_data), "unread_only": unread_only}
+            result = [TextContent(
                 type="text",
-                text=json.dumps({
-                    "messages": result_data,
-                    "count": len(result_data),
-                    "unread_only": unread_only,
-                }),
+                text=json.dumps(result_dict),
             )]
+            try:
+                memory_recorder.record_tool_call("check_inbox", arguments, result_dict, agent_id)
+            except Exception:
+                pass
+            return result
 
         # ── Phase 2: temporal tools ────────────────
         temporal_names = {s["name"] for s in ALL_TEMPORAL_SCHEMAS}
         if name in temporal_names:
-            result = temporal_handlers.dispatch(name, arguments, agent_id)
-            return [TextContent(type="text", text=result)]
+            result_str = temporal_handlers.dispatch(name, arguments, agent_id)
+            result = [TextContent(type="text", text=result_str)]
+            try:
+                memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id)
+            except Exception:
+                pass
+            return result
 
         # ── Phase 3: spatial tools ────────────────
         spatial_names = {s["name"] for s in ALL_SPATIAL_SCHEMAS}
         if name in spatial_names:
-            result = spatial_handlers.dispatch(name, arguments, agent_id)
-            return [TextContent(type="text", text=result)]
+            result_str = spatial_handlers.dispatch(name, arguments, agent_id)
+            result = [TextContent(type="text", text=result_str)]
+            try:
+                memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id)
+            except Exception:
+                pass
+            return result
 
         # ── Unknown tool ───────────────────────────
         return [TextContent(
