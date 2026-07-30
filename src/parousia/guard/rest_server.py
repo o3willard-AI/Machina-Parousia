@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from parousia.config import load_config
 from parousia.auth.accounts import AccountStore
+from parousia.auth.invites import InviteStore
 from parousia.auth.middleware import AgentAuthMiddleware, get_account
 from parousia.auth.onboard import OnboardRequest, OnboardResponse, handle_onboard
 from parousia.inbox.inbox_store import InboxStore
@@ -26,15 +27,17 @@ logger = logging.getLogger("parousia.rest")
 
 app = FastAPI(title="Parousia Guard — REST Ingress")
 
-# ── Account store & auth middleware ──────────────────
+# ── Stores ──────────────────────────────────────
 
 _account_store = AccountStore()
+_invite_store = InviteStore()
 _inbox_store = InboxStore()
 
 
 @app.on_event("startup")
 async def startup_accounts():
     _account_store.connect()
+    _invite_store.connect()
     # Initialize inbox store
     global _inbox_store
     _inbox_store = InboxStore()
@@ -264,7 +267,7 @@ setInterval(refresh, 5000);
 
 @app.post("/onboard", response_model=OnboardResponse)
 async def onboard(request: OnboardRequest):
-    return handle_onboard(_account_store, request)
+    return handle_onboard(_account_store, _invite_store, request)
 
 
 @app.get("/account")

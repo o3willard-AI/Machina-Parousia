@@ -71,6 +71,24 @@ class AccountStore:
             CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
             CREATE INDEX IF NOT EXISTS idx_accounts_tier ON accounts(tier);
             CREATE INDEX IF NOT EXISTS idx_key_events_account ON api_key_events(account_id);
+
+            -- Invite keys (Story: invite-gated onboarding)
+            CREATE TABLE IF NOT EXISTS invite_keys (
+                invite_code     TEXT PRIMARY KEY,
+                sponsor_id      TEXT NOT NULL,
+                sponsor_method  TEXT NOT NULL DEFAULT 'manual',
+                sponsor_contact TEXT NOT NULL DEFAULT '',
+                note            TEXT NOT NULL DEFAULT '',
+                status          TEXT NOT NULL DEFAULT 'unused',
+                used_by         TEXT NOT NULL DEFAULT '',
+                max_uses        INTEGER NOT NULL DEFAULT 1,
+                use_count       INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                used_at         TEXT NOT NULL DEFAULT '',
+                expires_at      TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_invite_status ON invite_keys(status);
+            CREATE INDEX IF NOT EXISTS idx_invite_sponsor ON invite_keys(sponsor_id);
         """)
         self._conn.commit()
 

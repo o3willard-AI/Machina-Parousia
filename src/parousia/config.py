@@ -80,6 +80,10 @@ class AdminConfig(BaseModel):
     api_key: str = ""  # Set via PAROUSIA_ADMIN_KEY env var
 
 
+class InvitesConfig(BaseModel):
+    require_invite: bool = True  # Require a valid invite code for onboarding
+
+
 class ParousiaConfig(BaseModel):
     domain: str = "agents.yourdomain.com"
     hostname: str = "mx.agents.yourdomain.com"
@@ -94,6 +98,7 @@ class ParousiaConfig(BaseModel):
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
     account_store: AccountStoreConfig = Field(default_factory=AccountStoreConfig)
     admin: AdminConfig = Field(default_factory=AdminConfig)
+    invites: InvitesConfig = Field(default_factory=InvitesConfig)
 
 
 def _find_config() -> Optional[Path]:

@@ -410,6 +410,99 @@ cli.add_command(monitor)
 from parousia.cli.spatial import spatial_group
 cli.add_command(spatial_group)
 
+# ── Invite group (invite-gated onboarding) ────────────────────────────
+
+
+@cli.group()
+def invite():
+    """Manage invite keys for gated onboarding."""
+    pass
+
+
+@invite.command()
+@click.option("--sponsor", default="stephen", help="Sponsor identifier (default: stephen)")
+@click.option("--contact", default="", help="Sponsor contact info (email, phone)")
+@click.option("--note", default="", help="Freeform note about the invitee")
+@click.option("--max-uses", default=1, type=int, help="Max uses (default: 1)")
+@click.option("--expires-in-days", default=0, type=int, help="Expiry in days (0 = never)")
+def create(sponsor, contact, note, max_uses, expires_in_days):
+    """Generate a one-time invite key."""
+    from parousia.auth.invites import InviteStore
+    from datetime import datetime, timezone, timedelta
+
+    store = InviteStore()
+    store.connect()
+
+    expires_at = ""
+    if expires_in_days > 0:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=expires_in_days)).isoformat()
+
+    invite_key = store.create(
+        sponsor_id=sponsor,
+        sponsor_contact=contact,
+        note=note,
+        max_uses=max_uses,
+        expires_at=expires_at,
+    )
+
+    click.secho(f"\n✓ Invite key created", fg="green")
+    click.echo(f"  Code:       {invite_key.invite_code}")
+    click.echo(f"  Sponsor:    {sponsor}")
+    if contact:
+        click.echo(f"  Contact:    {contact}")
+    if note:
+        click.echo(f"  Note:       {note}")
+    if max_uses > 1:
+        click.echo(f"  Max uses:   {max_uses}")
+    if expires_at:
+        click.echo(f"  Expires:    {expires_at}")
+    click.echo(f"\n  Give this code to the new agent's human:")
+    click.secho(f"  {invite_key.invite_code}", fg="bright_cyan", bold=True)
+
+    store.close()
+
+
+@invite.command()
+@click.option("--status", default=None, help="Filter: unused, used, revoked")
+def list(status):
+    """List invite keys."""
+    from parousia.auth.invites import InviteStore
+
+    store = InviteStore()
+    store.connect()
+
+    keys = store.list_invites(status=status, limit=50)
+    if not keys:
+        click.echo("No invite keys found.")
+    else:
+        click.echo(f"\n{'CODE':<32s} {'STATUS':<10s} {'SPONSOR':<15s} {'USED BY':<15s} {'NOTE'}")
+        click.echo("-" * 100)
+        for k in keys:
+            used_by = k.used_by if k.used_by else ("—" * 3)
+            note = k.note[:30] if k.note else "—"
+            click.echo(
+                f"{k.invite_code:<32s} {k.status:<10s} {k.sponsor_id:<15s} {used_by:<15s} {note}"
+            )
+
+    store.close()
+
+
+@invite.command()
+@click.argument("code")
+def revoke(code):
+    """Revoke an unused invite key."""
+    from parousia.auth.invites import InviteStore
+
+    store = InviteStore()
+    store.connect()
+
+    if store.revoke(code):
+        click.secho(f"✓ Revoked: {code}", fg="green")
+    else:
+        click.secho(f"✗ Not found or already used: {code}", fg="red")
+
+    store.close()
+
 
 if __name__ == "__main__":
     cli()
