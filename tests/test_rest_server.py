@@ -1,5 +1,4 @@
 """Tests for REST ingest server and MIME parsing."""
-
 import email
 import json
 from email.mime.multipart import MIMEMultipart
@@ -54,9 +53,29 @@ def agent_config():
     )
 
 
-def test_ingest_accepts_valid_payload(valid_payload, agent_config, monkeypatch):
-    monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: agent_config)
+@pytest.fixture
+def account_store(tmp_path):
+    """Real AccountStore on a temp SQLite DB, connected for the test."""
+    from parousia.auth.accounts import AccountStore
 
+    db = tmp_path / "test_accounts.db"
+    store = AccountStore(str(db))
+    store.connect()
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def empty_agent_config():
+    """Config with NO legacy agents — forces AccountStore lookup."""
+    from parousia.config import ParousiaConfig
+
+    return ParousiaConfig(agents={})
+
+
+def test_ingest_accepts_valid_payload(valid_payload, agent_config, account_store, monkeypatch):
+    monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: agent_config)
+    monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
     resp = client.post("/ingest", json=valid_payload)
     assert resp.status_code == 200
     data = resp.json()
@@ -65,8 +84,9 @@ def test_ingest_accepts_valid_payload(valid_payload, agent_config, monkeypatch):
     assert len(data["task_id"]) > 0
 
 
-def test_ingest_rejects_unknown_agent(valid_payload, agent_config, monkeypatch):
+def test_ingest_rejects_unknown_agent(valid_payload, agent_config, account_store, monkeypatch):
     monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: agent_config)
+    monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
 
     payload = {**valid_payload, "agent_id": "unknown_bot"}
     resp = client.post("/ingest", json=payload)
@@ -76,6 +96,66 @@ def test_ingest_rejects_unknown_agent(valid_payload, agent_config, monkeypatch):
 def test_ingest_handles_missing_fields():
     resp = client.post("/ingest", json={"sender": "x@y.com"})
     assert resp.status_code == 422  # Pydantic validation
+
+
+# ── AccountStore dual-registry regression tests ──
+# Bug: /ingest validated recipients only against config.agents (legacy),
+# so onboarded agents (in AccountStore but not config.agents) got 404 and
+# their mail was silently dropped.  These tests verify the fix.
+
+
+def test_ingest_accountstore_only_agent_accepted(
+    valid_payload, empty_agent_config, account_store, monkeypatch
+):
+    """Account in AccountStore but NOT in config.agents → 200."""
+    monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: empty_agent_config)
+    monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
+    account_store.create_account("tina", tier="free")
+
+    payload = {**valid_payload, "agent_id": "tina"}
+    resp = client.post("/ingest", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["agent_id"] == "tina"
+
+
+def test_ingest_suspended_account_rejected(
+    valid_payload, empty_agent_config, account_store, monkeypatch
+):
+    """Account with status != 'active' in AccountStore → 403."""
+    monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: empty_agent_config)
+    monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
+    account_store.create_account("tina", tier="free")
+    account_store.set_status("tina", "suspended")
+
+    payload = {**valid_payload, "agent_id": "tina"}
+    resp = client.post("/ingest", json=payload)
+    assert resp.status_code == 403
+
+
+def test_ingest_truly_unknown_agent_404(
+    valid_payload, empty_agent_config, account_store, monkeypatch
+):
+    """Agent in neither AccountStore nor config.agents → 404."""
+    monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: empty_agent_config)
+    monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
+
+    payload = {**valid_payload, "agent_id": "ghost"}
+    resp = client.post("/ingest", json=payload)
+    assert resp.status_code == 404
+
+
+def test_ingest_legacy_config_only_agent_still_accepted(
+    valid_payload, agent_config, account_store, monkeypatch
+):
+    """Agent in config.agents but NOT AccountStore → 200 (legacy fallback)."""
+    monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: agent_config)
+    monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
+    # agent_config has only "hermes"; account_store has nobody
+    assert account_store.get_account("hermes") is None
+
+    resp = client.post("/ingest", json=valid_payload)
+    assert resp.status_code == 200
+    assert resp.json()["agent_id"] == "hermes"
 
 
 # ── MIME parsing (ingest.py) ──

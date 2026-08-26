@@ -100,10 +100,24 @@ async def ingest(request: IngestRequest):
     """
     config = load_config()
 
-    # Look up agent config
-    agent_cfg = config.agents.get(request.agent_id)
-    if not agent_cfg:
-        raise HTTPException(status_code=404, detail=f"Unknown agent: {request.agent_id}")
+    # Resolve agent identity across both registries.
+    # config.agents — legacy static dict in config.yaml.
+    # _account_store — modern SQLite AccountStore (source of truth for
+    # onboarded agents). An agent is valid if known to EITHER registry.
+    agent_account = _account_store.get_account(request.agent_id)
+
+    if agent_account is not None:
+        # Known to AccountStore — enforce status.
+        if agent_account.status != "active":
+            raise HTTPException(
+                status_code=403,
+                detail=f"Account '{request.agent_id}' is {agent_account.status}",
+            )
+    elif request.agent_id not in config.agents:
+        # Not in AccountStore and not in legacy config → unknown.
+        raise HTTPException(
+            status_code=404, detail=f"Unknown agent: {request.agent_id}"
+        )
 
     task_id = str(uuid.uuid4())[:12]
 

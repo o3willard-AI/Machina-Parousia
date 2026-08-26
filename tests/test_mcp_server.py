@@ -1,5 +1,5 @@
 """Tests for MCP outbound server and email sender."""
-
+import json
 import smtplib
 from unittest.mock import MagicMock, patch
 
@@ -115,8 +115,10 @@ def test_send_email_tool_schema_has_required_fields(mock_config, mock_redis, mon
 
 @pytest.fixture
 def mock_rate_limiter():
-    """Create a mock rate limiter."""
-    return MagicMock(spec=RateLimiter)
+    """Create a mock rate limiter that always allows."""
+    rl = MagicMock(spec=RateLimiter)
+    rl.check.return_value = (True, 99, 3600)
+    return rl
 
 
 @pytest.fixture
@@ -204,3 +206,146 @@ def test_send_email_unknown_agent(mock_rate_limiter, mock_redis_client):
     assert len(config.agents) == 1
     assert "agent-a" in config.agents
     assert arguments["from_agent"] == "nonexistent"
+
+
+# ── send_email from_agent validation (dual-registry regression) ──
+# Bug: _handle_send_email validated from_agent only against config.agents,
+# so onboarded agents (in AccountStore but not config.agents) got
+# "Unknown agent" and could not send.  These tests verify the fix.
+
+
+@pytest.fixture
+def account_store(tmp_path):
+    """Real AccountStore on a temp SQLite DB."""
+    from parousia.auth.accounts import AccountStore
+
+    db = tmp_path / "mcp_accounts.db"
+    store = AccountStore(str(db))
+    store.connect()
+    yield store
+    store.close()
+
+
+@pytest.fixture
+def empty_config():
+    """Config with no legacy agents — forces AccountStore lookup."""
+    return ParousiaConfig(domain="agents.test.com", agents={})
+
+
+def _run_send_email(arguments, config, rate_limiter, redis_client, account=None, account_store=None):
+    """Helper: synchronously invoke the async _handle_send_email."""
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            _handle_send_email(arguments, config, rate_limiter, redis_client, account, account_store)
+        )
+    finally:
+        loop.close()
+
+
+def test_send_email_onsio_accountstore_only_agent(
+    mock_rate_limiter, mock_redis_client, account_store, empty_config, monkeypatch
+):
+    """Onboarded agent (AccountStore, not config.agents) can send via from_agent."""
+    monkeypatch.setattr("parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id")
+    account_store.create_account("tina", tier="free")
+    arguments = {
+        "to": "human@example.com",
+        "subject": "Hi",
+        "body": "Hello",
+        "from_agent": "tina",
+    }
+    result = _run_send_email(
+        arguments, empty_config, mock_rate_limiter, mock_redis_client,
+        account=None, account_store=account_store,
+    )
+    data = json.loads(result[0].text)
+    assert data["sent"] is True
+
+
+def test_send_email_authenticated_account_not_in_config(
+    mock_rate_limiter, mock_redis_client, account_store, empty_config, monkeypatch
+):
+    """Authenticated caller whose account is only in AccountStore can send."""
+    monkeypatch.setattr("parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id")
+    _, raw_key = account_store.create_account("tina", tier="free")
+    account = account_store.authenticate(raw_key)
+    assert account is not None
+    arguments = {
+        "to": "human@example.com",
+        "subject": "Hi",
+        "body": "Hello",
+    }
+    result = _run_send_email(
+        arguments, empty_config, mock_rate_limiter, mock_redis_client,
+        account=account, account_store=account_store,
+    )
+    data = json.loads(result[0].text)
+    assert data["sent"] is True
+    assert data["message_id"] == "msg-id"
+
+
+def test_send_email_suspended_account_rejected(
+    mock_rate_limiter, mock_redis_client, account_store, empty_config, monkeypatch
+):
+    """Suspended AccountStore account → send_email error, not sent."""
+    monkeypatch.setattr("parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id")
+    account_store.create_account("tina", tier="free")
+    account_store.set_status("tina", "suspended")
+    account = account_store.get_account("tina")
+    arguments = {
+        "to": "human@example.com",
+        "subject": "Hi",
+        "body": "Hello",
+    }
+    result = _run_send_email(
+        arguments, empty_config, mock_rate_limiter, mock_redis_client,
+        account=account, account_store=account_store,
+    )
+    data = json.loads(result[0].text)
+    assert data["sent"] is False
+    assert "suspended" in data["error"]
+
+
+def test_send_email_truly_unknown_agent(
+    mock_rate_limiter, mock_redis_client, account_store, empty_config, monkeypatch
+):
+    """Agent in neither registry → 'Unknown agent' error."""
+    monkeypatch.setattr("parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id")
+    arguments = {
+        "to": "human@example.com",
+        "subject": "Hi",
+        "body": "Hello",
+        "from_agent": "ghost",
+    }
+    result = _run_send_email(
+        arguments, empty_config, mock_rate_limiter, mock_redis_client,
+        account=None, account_store=account_store,
+    )
+    data = json.loads(result[0].text)
+    assert data["sent"] is False
+    assert "Unknown agent" in data["error"]
+
+
+def test_send_email_legacy_config_only_agent(
+    mock_rate_limiter, mock_redis_client, account_store, monkeypatch
+):
+    """Config-only agent (not in AccountStore) can send — legacy fallback."""
+    monkeypatch.setattr("parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id")
+    config = ParousiaConfig(
+        domain="agents.test.com",
+        agents={"mr-krabs": AgentConfig()},
+    )
+    arguments = {
+        "to": "human@example.com",
+        "subject": "Hi",
+        "body": "Hello",
+        "from_agent": "mr-krabs",
+    }
+    result = _run_send_email(
+        arguments, config, mock_rate_limiter, mock_redis_client,
+        account=None, account_store=account_store,
+    )
+    data = json.loads(result[0].text)
+    assert data["sent"] is True
