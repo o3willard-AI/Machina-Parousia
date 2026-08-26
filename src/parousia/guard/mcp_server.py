@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 from typing import Any
+from uuid import UUID
 
 import redis as redis_lib
 from mcp.server import Server
@@ -23,8 +24,8 @@ from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Mount, Route
 
-from parousia.auth.accounts import AccountStore
-from parousia.auth.mcp_auth import get_auth_context
+from parousia.auth.accounts import Account, AccountStore
+from parousia.auth.mcp_auth import authenticate_mcp, get_auth_context, set_auth_context
 from parousia.config import load_config
 from parousia.guard.email_sender import send_email as _smtp_send
 from parousia.guard.rate_limiter import RateLimiter
@@ -45,8 +46,12 @@ def _resolve_agent_id(config, arguments: dict) -> str:
     return agent_ids[0] if agent_ids else "default"
 
 
-def _build_server() -> Server:
-    """Create and configure the MCP server with email + temporal tools."""
+def _build_server() -> tuple[Server, AccountStore]:
+    """Create and configure the MCP server with email + temporal tools.
+
+    Returns a tuple of (server, account_store) so that run_mcp_server_sse
+    can use the real AccountStore for SSE auth.
+    """
     config = load_config()
 
     # Initialize rate limiter (Phase 1)
@@ -237,7 +242,7 @@ def _build_server() -> Server:
             text=json.dumps({"error": f"Unknown tool: {name}"}),
         )]
 
-    return server
+    return server, account_store
 
 
 async def _handle_send_email(
@@ -376,7 +381,7 @@ async def _handle_send_email(
 
 async def run_mcp_server():
     """Start the MCP server with stdio transport."""
-    server = _build_server()
+    server, _account_store = _build_server()
     async with stdio_server() as (read_stream, write_stream):
         logger.info("MCP server running on stdio transport")
         await server.run(
@@ -393,22 +398,78 @@ async def run_mcp_server_sse(host: str = "0.0.0.0", port: int = 8081):
     """
     import uvicorn
 
-    server = _build_server()
+    server, account_store = _build_server()
     sse = SseServerTransport("/messages/")
 
+    # ── Per-session account mapping ───────────────────────────────
+    # Maps session_id (UUID) → authenticated Account | None.
+    # Populated at GET /sse (connection time); consumed at POST /messages
+    # (tool-call time) to inject the contextvar into dispatch.
+    _session_accounts: dict[UUID, Account | None] = {}
+
     async def handle_sse(request):
+        """GET /sse — authenticate via Bearer token, then run the SSE transport."""
+        from starlette.responses import JSONResponse
+
+        # Validate Authorization header against AccountStore.
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Missing or invalid Authorization header"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        try:
+            account = authenticate_mcp(account_store, {"Authorization": auth_header})
+        except ValueError as e:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": str(e)},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Open the SSE connection; the transport assigns a session_id.
         async with sse.connect_sse(
             request.scope, request.receive, request._send
         ) as streams:
-            await server.run(
-                streams[0], streams[1],
-                server.create_initialization_options(),
-            )
+            # SseServerTransport._read_stream_writers gets a new entry on connect.
+            session_id = list(sse._read_stream_writers.keys())[-1]
+            _session_accounts[session_id] = account
+            try:
+                await server.run(
+                    streams[0], streams[1],
+                    server.create_initialization_options(),
+                )
+            finally:
+                _session_accounts.pop(session_id, None)
         return Response()
+
+    # ── Wrapped POST handler: inject account into contextvar ─────
+    # The MCP SDK's ContextSendStream captures contextvars.copy_context() at
+    # send() time; _spawn() then runs handlers via sender_ctx.run(...).
+    # So setting the contextvar HERE (in the POST handler, before the message
+    # enters the read stream) propagates into handle_call_tool's
+    # get_auth_context() call.
+    _original_post = sse.handle_post_message
+
+    async def handle_post_message(scope, receive, send):
+        """POST /messages — look up session account, set contextvar, forward."""
+        from starlette.requests import Request as _Request
+        request = _Request(scope, receive)
+        session_id_param = request.query_params.get("session_id")
+        if session_id_param:
+            try:
+                sid = UUID(hex=session_id_param)
+                account = _session_accounts.get(sid)
+                if account is not None:
+                    set_auth_context(account)
+            except ValueError:
+                pass
+        await _original_post(scope, receive, send)
 
     routes = [
         Route("/sse", endpoint=handle_sse, methods=["GET"]),
-        Mount("/messages/", app=sse.handle_post_message),
+        Mount("/messages/", app=handle_post_message),
     ]
 
     starlette_app = Starlette(routes=routes)

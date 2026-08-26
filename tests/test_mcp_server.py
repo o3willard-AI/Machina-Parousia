@@ -89,7 +89,7 @@ def test_mcp_server_builds_without_error(mock_config, mock_redis, monkeypatch):
     monkeypatch.setattr("parousia.guard.mcp_server.redis_lib.Redis", lambda **kw: mock_redis)
     monkeypatch.setattr("parousia.guard.mcp_server.TemporalDB", lambda **kw: _fake_temporal_db())
 
-    server = _build_server()
+    server, _account_store = _build_server()
     assert server.name == "parousia-guard-mcp"
 
 
@@ -100,7 +100,7 @@ def test_send_email_tool_schema_has_required_fields(mock_config, mock_redis, mon
     monkeypatch.setattr("parousia.guard.mcp_server.redis_lib.Redis", lambda **kw: mock_redis)
     monkeypatch.setattr("parousia.guard.mcp_server.TemporalDB", lambda **kw: _fake_temporal_db())
 
-    server = _build_server()
+    server, _account_store = _build_server()
     tool = next((t for t in server.tools if t.name == "send_email"), None)
     assert tool is not None
     schema = tool.input_schema
