@@ -164,7 +164,11 @@ def _build_server() -> Server:
 
         # ── Phase 1: send_email ────────────────────
         if name == "send_email":
-            result_content = await _handle_send_email(arguments, config, rate_limiter, redis_client)
+            # account is the authenticated Account (None on stdio w/o auth).
+            # account_store is the module-scoped singleton (passed via closure).
+            # Both are consulted so send_email can validate from_agent against
+            # BOTH registries (AccountStore + legacy config.agents).
+            result_content = await _handle_send_email(arguments, config, rate_limiter, redis_client, account, account_store)
             try:
                 memory_recorder.record_tool_call(
                     "send_email", arguments,
@@ -237,30 +241,72 @@ def _build_server() -> Server:
 
 
 async def _handle_send_email(
-    arguments: dict, config, rate_limiter: RateLimiter, redis_client
+    arguments: dict, config, rate_limiter: RateLimiter, redis_client,
+    account=None, account_store: AccountStore | None = None,
 ) -> list[TextContent]:
-    """Handle send_email tool call (Phase 1)."""
+    """Handle send_email tool call (Phase 1).
+
+    The authenticated ``account`` (None when the caller used stdio transport
+    without auth) is consulted first: if the caller supplies ``from_agent`` it
+    must match the authenticated account, otherwise the agent_id falls back to
+    ``from_agent`` or the first configured agent.  Agent validity is resolved
+    against AccountStore (modern source of truth) with a legacy config.agents
+    fallback so that config-only agents (mr-krabs, atlas) keep working.
+    """
     to = arguments["to"]
     subject = arguments["subject"]
     body = arguments["body"]
     reply_to = arguments.get("reply_to")
 
-    # Resolve agent — use from_agent param, then fallback to first configured
-    agent_id = arguments.get("from_agent")
-    if not agent_id:
-        agent_ids = list(config.agents.keys())
-        agent_id = agent_ids[0] if agent_ids else "default"
+    # ── Resolve agent_id ────────────────────────
+    # Authenticated caller's account is the strongest signal.  On stdio
+    # without auth the caller may pass from_agent explicitly; otherwise we
+    # fall back to the first configured agent.
+    if account is not None:
+        requested_agent = arguments.get("from_agent")
+        if requested_agent and requested_agent != account.account_id:
+            # Caller is authenticated as ``account`` but is trying to send
+            # *as* a different agent.  Only allow it if that agent doesn't
+            # exist as an AccountStore account (legacy passthrough).
+            if account_store is not None:
+                other_acct = account_store.get_account(requested_agent)
+                if other_acct is not None and other_acct.status == "active":
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "sent": False,
+                            "error": f"You are authenticated as '{account.account_id}', not '{requested_agent}'.",
+                        }),
+                    )]
+        agent_id = requested_agent or account.account_id
+    else:
+        # Stdio (no auth): behave as before — from_agent or first config agent.
+        agent_id = arguments.get("from_agent")
+        if not agent_id:
+            agent_ids = list(config.agents.keys())
+            agent_id = agent_ids[0] if agent_ids else "default"
 
-    # Validate agent exists
-    if agent_id != "default" and agent_id not in config.agents:
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "sent": False,
-                "error": f"Unknown agent: {agent_id}",
-                "available_agents": list(config.agents.keys()),
-            }),
-        )]
+    # ── Validate agent exists (both registries) ──
+    if agent_id != "default":
+        acct = account_store.get_account(agent_id) if account_store is not None else None
+        if acct is not None:
+            if acct.status != "active":
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "sent": False,
+                        "error": f"Account '{agent_id}' is {acct.status}",
+                    }),
+                )]
+        elif agent_id not in config.agents:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "sent": False,
+                    "error": f"Unknown agent: {agent_id}",
+                    "available_agents": list(config.agents.keys()),
+                }),
+            )]
 
     # Rate limit check
     allowed, remaining, reset_seconds = rate_limiter.check(agent_id)
