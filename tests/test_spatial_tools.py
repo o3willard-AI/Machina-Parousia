@@ -1,6 +1,7 @@
 import json
+import asyncio
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 
 from parousia.spatial.tools import (
     browse_to_schema,
@@ -12,8 +13,18 @@ from parousia.spatial.tools import (
 from parousia.config import ParousiaConfig
 
 
+def _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page):
+    """Build handlers with async get_browser -> mock_browser and context.new_page -> mock_page."""
+    mock_browser.context = MagicMock()
+    mock_browser.context.new_page = AsyncMock(return_value=mock_page)
+    mock_page.goto = AsyncMock()
+    mock_browser_pool_class.get_browser = AsyncMock(return_value=mock_browser)
+    config = ParousiaConfig()
+    return SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
+
+
 class TestSpatialTools(unittest.TestCase):
-    
+
     def test_browse_to_schema(self):
         """Test browse_to schema validation."""
         schema = browse_to_schema()
@@ -22,7 +33,7 @@ class TestSpatialTools(unittest.TestCase):
         self.assertIn("timeout_ms", schema["inputSchema"]["properties"])
         self.assertIn("extract_mode", schema["inputSchema"]["properties"])
         self.assertTrue("url" in schema["inputSchema"]["required"])
-        
+
     def test_interact_schema(self):
         """Test interact schema validation."""
         schema = interact_schema()
@@ -33,13 +44,13 @@ class TestSpatialTools(unittest.TestCase):
         self.assertIn("timeout_ms", schema["inputSchema"]["properties"])
         self.assertTrue("id" in schema["inputSchema"]["required"])
         self.assertTrue("action" in schema["inputSchema"]["required"])
-        
+
     def test_extract_page_state_schema(self):
         """Test extract_page_state schema validation."""
         schema = extract_page_state_schema()
         self.assertEqual(schema["name"], "extract_page_state")
         self.assertIn("mode", schema["inputSchema"]["properties"])
-        
+
     def test_all_spatial_schemas(self):
         """Test that ALL_SPATIAL_SCHEMAS contains correct schemas."""
         self.assertEqual(len(ALL_SPATIAL_SCHEMAS), 3)
@@ -60,15 +71,11 @@ class TestSpatialTools(unittest.TestCase):
         """Test browse_to handler success case."""
         mock_browser = MagicMock()
         mock_page = MagicMock()
-        mock_browser.new_page.return_value = mock_page
-        mock_page.content.return_value = "<html><body>Hello World</body></html>"
-
-        mock_browser_pool_class.get_browser.return_value = mock_browser
+        mock_page.content = AsyncMock(return_value="<html><body>Hello World</body></html>")
         mock_serializer_class.to_sdom.return_value = {"type": "sdom", "content": "test"}
 
-        config = ParousiaConfig()
-        handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
-        result = handlers.dispatch("browse_to", {"url": "https://example.com"}, "agent1")
+        handlers = _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page)
+        result = asyncio.run(handlers.dispatch("browse_to", {"url": "https://example.com"}, "agent1"))
         parsed_result = json.loads(result)
 
         self.assertTrue(parsed_result["extracted"])
@@ -80,12 +87,10 @@ class TestSpatialTools(unittest.TestCase):
         """Test interact handler with click action success case."""
         mock_browser = MagicMock()
         mock_page = MagicMock()
-        mock_browser.new_page.return_value = mock_page
-        mock_browser_pool_class.get_browser.return_value = mock_browser
+        mock_page.click = AsyncMock()
 
-        config = ParousiaConfig()
-        handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
-        result = handlers.dispatch("interact", {"id": "button1", "action": "click"}, "agent1")
+        handlers = _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page)
+        result = asyncio.run(handlers.dispatch("interact", {"id": "button1", "action": "click"}, "agent1"))
         parsed_result = json.loads(result)
 
         self.assertTrue(parsed_result["success"])
@@ -98,12 +103,10 @@ class TestSpatialTools(unittest.TestCase):
         """Test interact handler with type action success case."""
         mock_browser = MagicMock()
         mock_page = MagicMock()
-        mock_browser.new_page.return_value = mock_page
-        mock_browser_pool_class.get_browser.return_value = mock_browser
+        mock_page.type = AsyncMock()
 
-        config = ParousiaConfig()
-        handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
-        result = handlers.dispatch("interact", {"id": "input1", "action": "type", "text": "test"}, "agent1")
+        handlers = _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page)
+        result = asyncio.run(handlers.dispatch("interact", {"id": "input1", "action": "type", "text": "test"}, "agent1"))
         parsed_result = json.loads(result)
 
         self.assertTrue(parsed_result["success"])
@@ -116,15 +119,11 @@ class TestSpatialTools(unittest.TestCase):
         """Test extract_page_state handler success case."""
         mock_browser = MagicMock()
         mock_page = MagicMock()
-        mock_browser.new_page.return_value = mock_page
-        mock_page.content.return_value = "<html><body>Hello World</body></html>"
-
-        mock_browser_pool_class.get_browser.return_value = mock_browser
+        mock_page.content = AsyncMock(return_value="<html><body>Hello World</body></html>")
         mock_serializer_class.to_sdom.return_value = {"type": "sdom", "content": "test"}
 
-        config = ParousiaConfig()
-        handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
-        result = handlers.dispatch("extract_page_state", {"mode": "full"}, "agent1")
+        handlers = _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page)
+        result = asyncio.run(handlers.dispatch("extract_page_state", {"mode": "full"}, "agent1"))
         parsed_result = json.loads(result)
 
         self.assertTrue(parsed_result["extracted"])
@@ -134,11 +133,11 @@ class TestSpatialTools(unittest.TestCase):
     @patch('parousia.spatial.tools.SpatialSerializer')
     def test_handle_browser_unavailable(self, mock_serializer_class, mock_browser_pool_class):
         """Test handler when browser is unavailable."""
-        mock_browser_pool_class.get_browser.return_value = None
+        mock_browser_pool_class.get_browser = AsyncMock(return_value=None)
 
         config = ParousiaConfig()
         handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
-        result = handlers.dispatch("browse_to", {"url": "https://example.com"}, "agent1")
+        result = asyncio.run(handlers.dispatch("browse_to", {"url": "https://example.com"}, "agent1"))
         parsed_result = json.loads(result)
 
         self.assertIn("error", parsed_result)
@@ -149,21 +148,25 @@ class TestSpatialTools(unittest.TestCase):
         """Test that different agents get isolated browsers."""
         mock_browser1 = MagicMock()
         mock_page1 = MagicMock()
-        mock_browser1.new_page.return_value = mock_page1
-        mock_page1.content.return_value = "<html><body>Agent 1</body></html>"
+        mock_browser1.context = MagicMock()
+        mock_browser1.context.new_page = AsyncMock(return_value=mock_page1)
+        mock_page1.goto = AsyncMock()
+        mock_page1.content = AsyncMock(return_value="<html><body>Agent 1</body></html>")
         mock_browser2 = MagicMock()
         mock_page2 = MagicMock()
-        mock_browser2.new_page.return_value = mock_page2
-        mock_page2.content.return_value = "<html><body>Agent 2</body></html>"
+        mock_browser2.context = MagicMock()
+        mock_browser2.context.new_page = AsyncMock(return_value=mock_page2)
+        mock_page2.goto = AsyncMock()
+        mock_page2.content = AsyncMock(return_value="<html><body>Agent 2</body></html>")
 
-        mock_browser_pool_class.get_browser.side_effect = [mock_browser1, mock_browser2]
+        mock_browser_pool_class.get_browser = AsyncMock(side_effect=[mock_browser1, mock_browser2])
         mock_serializer_class.to_sdom.return_value = {"type": "sdom"}
 
         config = ParousiaConfig()
         handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
 
-        result1 = handlers.dispatch("browse_to", {"url": "https://a.example.com"}, "agent1")
-        result2 = handlers.dispatch("browse_to", {"url": "https://b.example.com"}, "agent2")
+        result1 = asyncio.run(handlers.dispatch("browse_to", {"url": "https://a.example.com"}, "agent1"))
+        result2 = asyncio.run(handlers.dispatch("browse_to", {"url": "https://b.example.com"}, "agent2"))
 
         parsed_result1 = json.loads(result1)
         parsed_result2 = json.loads(result2)
@@ -176,7 +179,7 @@ class TestSpatialTools(unittest.TestCase):
         """Test handling of unknown tools."""
         config = ParousiaConfig()
         handlers = SpatialToolHandlers(config, MagicMock(), MagicMock())
-        result = handlers.dispatch("unknown_tool", {}, "agent1")
+        result = asyncio.run(handlers.dispatch("unknown_tool", {}, "agent1"))
         parsed_result = json.loads(result)
         self.assertIn("error", parsed_result)
 

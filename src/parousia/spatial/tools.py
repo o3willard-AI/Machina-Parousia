@@ -1,6 +1,10 @@
 """MCP tool handler implementations for spatial tools.
 
 browse_to, interact, extract_page_state — registered on the existing MCP server (port 8081).
+
+All handlers are async: they drive ``playwright.async_api`` from inside the
+MCP server's asyncio event loop (the synchronous Playwright API cannot be used
+there). ``dispatch`` and every ``_handle_*`` method are coroutines.
 """
 
 import json
@@ -102,7 +106,7 @@ class SpatialToolHandlers:
         self.browser_pool = browser_pool
         self.serializer = serializer
 
-    def dispatch(self, name: str, arguments: dict[str, Any], agent_id: str) -> str:
+    async def dispatch(self, name: str, arguments: dict[str, Any], agent_id: str) -> str:
         """Route tool call to the correct handler and return JSON result."""
         handlers = {
             "browse_to": self._handle_browse_to,
@@ -113,7 +117,7 @@ class SpatialToolHandlers:
         if handler is None:
             return json.dumps({"error": f"Unknown spatial tool: {name}"})
         try:
-            result = handler(arguments, agent_id)
+            result = await handler(arguments, agent_id)
         except Exception as e:
             logger.error("spatial tool error", extra={"tool": name, "error": str(e)})
             result = {"error": str(e)}
@@ -121,23 +125,23 @@ class SpatialToolHandlers:
 
     # ── browse_to ──────────────────────────────────────
 
-    def _handle_browse_to(self, args: dict, agent_id: str) -> dict:
+    async def _handle_browse_to(self, args: dict, agent_id: str) -> dict:
         url = args["url"]
         timeout_ms = args.get("timeout_ms", 30000)
         extract_mode = args.get("extract_mode", "standard")
 
-        browser = self.browser_pool.get_browser(agent_id)
+        browser = await self.browser_pool.get_browser(agent_id)
         if not browser:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
         try:
-            # Navigate to the URL
-            page = browser.new_page()
-            page.goto(url, timeout=timeout_ms)
-            
+            # Navigate to the URL in a fresh page of the persistent context
+            page = await browser.context.new_page()
+            await page.goto(url, timeout=timeout_ms)
+
             # Extract content based on mode
-            sdom_content = self.serializer.to_sdom(page.content(), extract_mode)
-            
+            sdom_content = self.serializer.to_sdom(await page.content(), extract_mode)
+
             return {
                 "url": url,
                 "extracted": True,
@@ -149,47 +153,47 @@ class SpatialToolHandlers:
 
     # ── interact ───────────────────────────────────────
 
-    def _handle_interact(self, args: dict, agent_id: str) -> dict:
+    async def _handle_interact(self, args: dict, agent_id: str) -> dict:
         element_id = args["id"]
         action = args["action"]
         text = args.get("text")
         timeout_ms = args.get("timeout_ms", 30000)
 
-        browser = self.browser_pool.get_browser(agent_id)
+        browser = await self.browser_pool.get_browser(agent_id)
         if not browser:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
         try:
-            page = browser.new_page()
-            
+            page = await browser.context.new_page()
+
             # Perform the interaction based on action type
             if action == "click":
-                page.click(f"#{element_id}", timeout=timeout_ms)
+                await page.click(f"#{element_id}", timeout=timeout_ms)
             elif action == "type":
                 if text is None:
                     return {"error": "Text required for 'type' action"}
-                page.type(f"#{element_id}", text, timeout=timeout_ms)
+                await page.type(f"#{element_id}", text, timeout=timeout_ms)
             elif action == "scroll_into_view":
-                page.scroll_into_view(f"#{element_id}")
+                await page.scroll_into_view(f"#{element_id}")
             elif action == "select":
                 value = args.get("value")
                 if not value:
                     return {"error": "Value required for 'select' action"}
-                page.select_option(f"#{element_id}", value)
+                await page.select_option(f"#{element_id}", value)
             elif action == "check":
-                page.check(f"#{element_id}")
+                await page.check(f"#{element_id}")
             elif action == "uncheck":
-                page.uncheck(f"#{element_id}")
+                await page.uncheck(f"#{element_id}")
             elif action == "hover":
-                page.hover(f"#{element_id}")
+                await page.hover(f"#{element_id}")
             elif action == "press":
                 key = args.get("key")
                 if not key:
                     return {"error": "Key required for 'press' action"}
-                page.press(f"#{element_id}", key)
+                await page.press(f"#{element_id}", key)
             else:
                 return {"error": f"Unknown interaction action: {action}"}
-            
+
             return {
                 "id": element_id,
                 "action": action,
@@ -201,19 +205,19 @@ class SpatialToolHandlers:
 
     # ── extract_page_state ─────────────────────────────
 
-    def _handle_extract_page_state(self, args: dict, agent_id: str) -> dict:
+    async def _handle_extract_page_state(self, args: dict, agent_id: str) -> dict:
         mode = args.get("mode", "full")
 
-        browser = self.browser_pool.get_browser(agent_id)
+        browser = await self.browser_pool.get_browser(agent_id)
         if not browser:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
         try:
-            page = browser.new_page()
-            
+            page = await browser.context.new_page()
+
             # Extract content based on mode
-            sdom_content = self.serializer.to_sdom(page.content(), mode)
-            
+            sdom_content = self.serializer.to_sdom(await page.content(), mode)
+
             return {
                 "mode": mode,
                 "extracted": True,

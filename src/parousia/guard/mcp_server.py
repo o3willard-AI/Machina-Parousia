@@ -228,7 +228,7 @@ def _build_server() -> tuple[Server, AccountStore]:
         # ── Phase 3: spatial tools ────────────────
         spatial_names = {s["name"] for s in ALL_SPATIAL_SCHEMAS}
         if name in spatial_names:
-            result_str = spatial_handlers.dispatch(name, arguments, agent_id)
+            result_str = await spatial_handlers.dispatch(name, arguments, agent_id)
             result = [TextContent(type="text", text=result_str)]
             try:
                 memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id)
