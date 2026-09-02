@@ -96,6 +96,6 @@ class TestMCPMemoryIntegration:
         # Patch TemporalDB to use a temp file instead of /var/lib/
         import parousia.temporal.db as tdb
         monkeypatch.setattr(tdb, "DEFAULT_DB_PATH", str(tmp_path / "temporal.db"))
-        server = _build_server()
+        server, _account_store = _build_server()
         assert server is not None
         assert server.name == "parousia-guard-mcp"
