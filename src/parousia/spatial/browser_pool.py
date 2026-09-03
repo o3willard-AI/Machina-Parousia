@@ -35,11 +35,12 @@ class BrowserUnavailableError(Exception):
 class BrowserInstance:
     """Represents a single browser instance with its associated data.
 
-    Note on the `browser` / `context` fields: Playwright's
+    Note on the ``browser`` / ``context`` fields: Playwright's
     ``launch_persistent_context`` returns a *BrowserContext* (there is no
     separate Browser object for a persistent context). Both ``browser`` and
     ``context`` therefore alias the same persistent context — callers should
-    use ``context`` for semantic clarity (e.g. ``context.new_page()``).
+    use ``context`` for semantic clarity (e.g. ``context.new_page()``). The
+    parent Browser is reachable via ``context.browser``.
     """
     agent_id: str
     playwright: object
@@ -52,9 +53,15 @@ class BrowserInstance:
     pid: int
 
     def is_alive(self) -> bool:
-        """Check if the browser is still connected and alive."""
+        """Check if the browser is still connected and alive.
+
+        ``self.browser`` / ``self.context`` hold the persistent *BrowserContext*;
+        ``BrowserContext`` has no ``is_connected()`` method, so liveness is read
+        off the parent Browser via ``context.browser``.
+        """
         try:
-            return self.browser.is_connected()
+            browser = self.context.browser
+            return browser is not None and browser.is_connected()
         except Exception:
             return False
 
@@ -64,7 +71,17 @@ class BrowserPoolManager:
     All Playwright interaction is async (``playwright.async_api``): the pool is
     driven from the Parousia MCP server, which runs inside an asyncio event
     loop. The synchronous API cannot be used there.
+
+    Self-healing: ``get_browser`` re-validates a cached instance's liveness on
+    every call and transparently relaunches if the browser has died, so a
+    crashed/stuck Chromium does not poison the in-memory cache until a service
+    restart.
     """
+
+    # Upper bound on how long a single browser close/stop may take. A stuck
+    # Playwright driver node never responds, so without this a cleanup could
+    # hang indefinitely (e.g. atexit shutdown).
+    CLOSE_TIMEOUT_SECONDS = 10.0
 
     def __init__(self, config: SpatialConfig):
         self.config = config
@@ -82,13 +99,44 @@ class BrowserPoolManager:
         except Exception:
             pass  # interpreter shutdown — browser child processes are OS-cleaned anyway
 
+    async def _close_instance(self, agent_id: str):
+        """Close one browser instance and clear its lock, if present.
+
+        Safe to call for an agent with no cached instance. Close/stop are
+        wrapped in a timeout so a stuck Playwright driver can't hang cleanup.
+        """
+        browser_instance = self._browsers.pop(agent_id, None)
+        if browser_instance is not None:
+            try:
+                await asyncio.wait_for(browser_instance.browser.close(), timeout=self.CLOSE_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(browser_instance.playwright.stop(), timeout=self.CLOSE_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+
+        lock_file = self._lock_files.pop(agent_id, None)
+        if lock_file is not None and lock_file.exists():
+            try:
+                lock_file.unlink()
+            except Exception:
+                pass
+
     async def get_browser(self, agent_id: str) -> BrowserInstance:
-        """Get a browser instance for the given agent ID."""
+        """Get a browser instance for the given agent ID.
+
+        Re-validates liveness of a cached instance and relaunches if it has
+        died, so callers never receive a stale/poisoned browser.
+        """
         if agent_id in self._browsers:
-            # Already have an instance — update last_used_at and return
             browser_instance = self._browsers[agent_id]
-            browser_instance.last_used_at = time.time()
-            return browser_instance
+            if browser_instance.is_alive():
+                browser_instance.last_used_at = time.time()
+                return browser_instance
+            # Cached browser has died (crashed Chromium / stuck driver) —
+            # close it and fall through to a fresh launch.
+            await self._close_instance(agent_id)
 
         # Enforce max_instances
         if len(self._browsers) >= self.config.max_instances:
@@ -216,35 +264,25 @@ class BrowserPoolManager:
 
         for agent_id, browser_instance in self._browsers.items():
             if current_time - browser_instance.last_used_at > self.config.idle_timeout_seconds:
-                try:
-                    await browser_instance.browser.close()
-                    await browser_instance.playwright.stop()
-                    to_remove.append(agent_id)
-                except Exception:
-                    pass  # Continue with other browsers
+                to_remove.append(agent_id)
 
-        # Remove the browsers that were closed
         for agent_id in to_remove:
-            if agent_id in self._browsers:
-                del self._browsers[agent_id]
+            await self._close_instance(agent_id)
 
     async def shutdown_all(self):
         """Close all browser instances."""
-        for agent_id, browser_instance in self._browsers.items():
-            try:
-                await browser_instance.browser.close()
-                await browser_instance.playwright.stop()
-            except Exception:
-                pass  # Ignore errors during shutdown
-        self._browsers.clear()
+        for agent_id in list(self._browsers.keys()):
+            await self._close_instance(agent_id)
 
-        # Clean up lock files
-        for lock_file in self._lock_files.values():
+        # Clear any remaining lock files (e.g. locks whose browser was never
+        # launched, or leftover entries not tracked in _browsers).
+        for lock_file in list(self._lock_files.values()):
             try:
                 if lock_file.exists():
                     lock_file.unlink()
             except Exception:
                 pass
+        self._lock_files.clear()
 
     def status(self) -> dict:
         """Get status information about all browsers."""
@@ -274,16 +312,10 @@ class BrowserPoolManager:
         """Remove the profile directory for an agent."""
         profile_dir = Path(self.config.profile_dir) / agent_id
 
-        # Close browser if it exists
-        if agent_id in self._browsers:
-            try:
-                await self._browsers[agent_id].browser.close()
-                await self._browsers[agent_id].playwright.stop()
-                del self._browsers[agent_id]
-            except Exception:
-                pass
+        # Close browser if it exists (also clears its lock)
+        await self._close_instance(agent_id)
 
-        # Remove lock file if exists
+        # Remove any lock file that may still be present
         lock_file = profile_dir / "profile.lock"
         if lock_file.exists():
             try:

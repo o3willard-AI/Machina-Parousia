@@ -21,7 +21,8 @@ def _make_mock_browser():
     mock_browser = MagicMock()
     mock_page = MagicMock()
     mock_browser.pages = [mock_page]
-    mock_browser.is_connected.return_value = True
+    mock_browser.browser = MagicMock()
+    mock_browser.browser.is_connected.return_value = True
     mock_browser.close = AsyncMock()
     mock_pw_instance.stop = AsyncMock()
     mock_pw_instance.chromium = MagicMock()
@@ -137,7 +138,7 @@ def test_shutdown_all(browser_pool_manager, tmp_path):
         assert b2.is_alive() is True
         asyncio.run(browser_pool_manager.shutdown_all())
         # After shutdown, browser.is_connected should return False
-        mock_browser.is_connected.return_value = False
+        mock_browser.browser.is_connected.return_value = False
         assert b1.is_alive() is False
         assert b2.is_alive() is False
 
@@ -169,8 +170,24 @@ def test_is_alive(browser_pool_manager, tmp_path):
         mock_pw, mock_browser, mock_page = _patch_playwright(mock_playwright)
         browser_instance = asyncio.run(browser_pool_manager.get_browser("test_agent"))
         assert browser_instance.is_alive() is True
-        mock_browser.is_connected.return_value = False
+        mock_browser.browser.is_connected.return_value = False
         assert browser_instance.is_alive() is False
+
+
+def test_self_heal_relaunches_dead_browser(browser_pool_manager, tmp_path):
+    """get_browser relaunches a fresh instance when the cached browser dies."""
+    with patch('parousia.spatial.browser_pool.async_playwright') as mock_playwright:
+        mock_pw, mock_browser, mock_page = _patch_playwright(mock_playwright)
+        b1 = asyncio.run(browser_pool_manager.get_browser("test_agent"))
+        assert b1.is_alive() is True
+        # Simulate the Chromium dying out from under the pool
+        mock_browser.browser.is_connected.return_value = False
+        # Next get_browser must detect the dead instance and relaunch
+        mock_pw2, mock_browser2, mock_page2 = _make_mock_browser()
+        mock_playwright.return_value.start = AsyncMock(return_value=mock_pw2)
+        b2 = asyncio.run(browser_pool_manager.get_browser("test_agent"))
+        assert b2 is not None
+        assert b2 is not b1  # a fresh instance, not the poisoned cached one
 
 
 def test_health_check_retry(browser_pool_manager, tmp_path):
