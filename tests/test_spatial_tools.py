@@ -13,10 +13,16 @@ from parousia.spatial.tools import (
 from parousia.config import ParousiaConfig
 
 
+def _mock_sdom(dump_value):
+    """Return a mock SDOM object whose .model_dump() yields a JSON-safe dict."""
+    mock = MagicMock()
+    mock.model_dump.return_value = dump_value
+    return mock
+
+
 def _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page):
-    """Build handlers with async get_browser -> mock_browser and context.new_page -> mock_page."""
-    mock_browser.context = MagicMock()
-    mock_browser.context.new_page = AsyncMock(return_value=mock_page)
+    """Build handlers with async get_browser -> mock_browser and .page -> mock_page."""
+    mock_browser.page = mock_page
     mock_page.goto = AsyncMock()
     mock_browser_pool_class.get_browser = AsyncMock(return_value=mock_browser)
     config = ParousiaConfig()
@@ -61,9 +67,10 @@ class TestSpatialTools(unittest.TestCase):
 
     # ── Handler tests ────────────────────────────────────────────────
     # Handlers store mocks directly (no .return_value indirection).
-    # _handle_* call self.browser_pool.get_browser() and
-    # self.serializer.to_sdom() — so attrs go on the class mock,
-    # not on mock_class.return_value.
+    # _handle_* call self.browser_pool.get_browser() and use the browser's
+    # persistent .page, plus self.serializer.to_sdom(). The serializer now
+    # returns an SDOM object, so handlers must call .model_dump() before the
+    # result is json.dumps'd by dispatch().
 
     @patch('parousia.spatial.tools.BrowserPoolManager')
     @patch('parousia.spatial.tools.SpatialSerializer')
@@ -72,7 +79,7 @@ class TestSpatialTools(unittest.TestCase):
         mock_browser = MagicMock()
         mock_page = MagicMock()
         mock_page.content = AsyncMock(return_value="<html><body>Hello World</body></html>")
-        mock_serializer_class.to_sdom.return_value = {"type": "sdom", "content": "test"}
+        mock_serializer_class.to_sdom.return_value = _mock_sdom({"type": "sdom", "content": "test"})
 
         handlers = _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page)
         result = asyncio.run(handlers.dispatch("browse_to", {"url": "https://example.com"}, "agent1"))
@@ -80,6 +87,7 @@ class TestSpatialTools(unittest.TestCase):
 
         self.assertTrue(parsed_result["extracted"])
         self.assertEqual(parsed_result["url"], "https://example.com")
+        self.assertEqual(parsed_result["sdom"], {"type": "sdom", "content": "test"})
 
     @patch('parousia.spatial.tools.BrowserPoolManager')
     @patch('parousia.spatial.tools.SpatialSerializer')
@@ -120,7 +128,8 @@ class TestSpatialTools(unittest.TestCase):
         mock_browser = MagicMock()
         mock_page = MagicMock()
         mock_page.content = AsyncMock(return_value="<html><body>Hello World</body></html>")
-        mock_serializer_class.to_sdom.return_value = {"type": "sdom", "content": "test"}
+        mock_page.url = "https://example.com"
+        mock_serializer_class.to_sdom.return_value = _mock_sdom({"type": "sdom", "content": "test"})
 
         handlers = _make_handler(mock_browser_pool_class, mock_serializer_class, mock_browser, mock_page)
         result = asyncio.run(handlers.dispatch("extract_page_state", {"mode": "full"}, "agent1"))
@@ -148,19 +157,17 @@ class TestSpatialTools(unittest.TestCase):
         """Test that different agents get isolated browsers."""
         mock_browser1 = MagicMock()
         mock_page1 = MagicMock()
-        mock_browser1.context = MagicMock()
-        mock_browser1.context.new_page = AsyncMock(return_value=mock_page1)
+        mock_browser1.page = mock_page1
         mock_page1.goto = AsyncMock()
         mock_page1.content = AsyncMock(return_value="<html><body>Agent 1</body></html>")
         mock_browser2 = MagicMock()
         mock_page2 = MagicMock()
-        mock_browser2.context = MagicMock()
-        mock_browser2.context.new_page = AsyncMock(return_value=mock_page2)
+        mock_browser2.page = mock_page2
         mock_page2.goto = AsyncMock()
         mock_page2.content = AsyncMock(return_value="<html><body>Agent 2</body></html>")
 
         mock_browser_pool_class.get_browser = AsyncMock(side_effect=[mock_browser1, mock_browser2])
-        mock_serializer_class.to_sdom.return_value = {"type": "sdom"}
+        mock_serializer_class.to_sdom.return_value = _mock_sdom({"type": "sdom"})
 
         config = ParousiaConfig()
         handlers = SpatialToolHandlers(config, mock_browser_pool_class, mock_serializer_class)
@@ -182,6 +189,38 @@ class TestSpatialTools(unittest.TestCase):
         result = asyncio.run(handlers.dispatch("unknown_tool", {}, "agent1"))
         parsed_result = json.loads(result)
         self.assertIn("error", parsed_result)
+
+    @patch('parousia.spatial.tools.BrowserPoolManager')
+    def test_browse_to_with_real_serializer_returns_json(self, mock_browser_pool_class):
+        """Regression: a real serializer returns an SDOM object (not a dict), which
+        must be serialized before dispatch() json.dumps it. This is the bug that
+        surfaced as 'Object of type SDOM is not JSON serializable'."""
+        from parousia.spatial.serializer import SpatialSerializer
+
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_page.goto = AsyncMock(return_value=MagicMock(status=200))
+        mock_page.content = AsyncMock(
+            return_value=(
+                "<html><head><title>Signup</title></head><body>"
+                "<a href='/login'>Sign in</a>"
+                "<form><input id='email-address' type='text'><button type='submit'>Join</button></form>"
+                "</body></html>"
+            )
+        )
+        mock_browser.page = mock_page
+        mock_browser_pool_class.get_browser = AsyncMock(return_value=mock_browser)
+
+        config = ParousiaConfig()
+        handlers = SpatialToolHandlers(config, mock_browser_pool_class, SpatialSerializer())
+        result = asyncio.run(handlers.dispatch("browse_to", {"url": "https://www.linkedin.com/signup"}, "tina"))
+
+        parsed = json.loads(result)  # must not raise
+        self.assertTrue(parsed["extracted"])
+        self.assertEqual(parsed["url"], "https://www.linkedin.com/signup")
+        self.assertIn("sdom", parsed)
+        self.assertIn("interactive", parsed["sdom"])
+        self.assertEqual(parsed["sdom"]["meta"]["url"], "https://www.linkedin.com/signup")
 
 
 if __name__ == '__main__':

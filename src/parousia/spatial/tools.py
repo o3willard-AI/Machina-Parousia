@@ -135,17 +135,18 @@ class SpatialToolHandlers:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
         try:
-            # Navigate to the URL in a fresh page of the persistent context
-            page = await browser.context.new_page()
-            await page.goto(url, timeout=timeout_ms)
+            # Navigate the agent's persistent page
+            page = browser.page
+            response = await page.goto(url, timeout=timeout_ms)
+            status = response.status if response is not None else 200
 
-            # Extract content based on mode
-            sdom_content = self.serializer.to_sdom(await page.content(), extract_mode)
+            # Extract content as SDOM, then serialize to a JSON-safe dict
+            sdom = self.serializer.to_sdom(await page.content(), url, status)
 
             return {
                 "url": url,
                 "extracted": True,
-                "sdom": sdom_content,
+                "sdom": sdom.model_dump(),
             }
         except Exception as e:
             logger.error("browse_to failed", extra={"url": url, "error": str(e)})
@@ -164,7 +165,7 @@ class SpatialToolHandlers:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
         try:
-            page = await browser.context.new_page()
+            page = browser.page
 
             # Perform the interaction based on action type
             if action == "click":
@@ -213,15 +214,15 @@ class SpatialToolHandlers:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
         try:
-            page = await browser.context.new_page()
+            page = browser.page
 
-            # Extract content based on mode
-            sdom_content = self.serializer.to_sdom(await page.content(), mode)
+            # Extract content as SDOM, then serialize to a JSON-safe dict
+            sdom = self.serializer.to_sdom(await page.content(), page.url, 200)
 
             return {
                 "mode": mode,
                 "extracted": True,
-                "sdom": sdom_content,
+                "sdom": sdom.model_dump(),
             }
         except Exception as e:
             logger.error("extract_page_state failed", extra={"mode": mode, "error": str(e)})
