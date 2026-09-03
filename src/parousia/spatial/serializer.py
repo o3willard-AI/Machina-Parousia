@@ -297,11 +297,15 @@ class SpatialSerializer:
                     else:
                         element_type = 'input'
             
-            # If we have a valid type, assign ID
+            # If we have a valid type, assign a synthetic ID only when the
+            # element has no usable id of its own. Real `id` attributes MUST be
+            # preserved so `interact` can target the live DOM via `#<id>` — the
+            # previous behaviour overwrote them (e.g. LinkedIn's `email-address`
+            # became `i1`), leaving `interact` with nothing to select.
             if element_type and element_type in counters:
-                counters[element_type] += 1
-                element_id = f"{element_type[0]}{counters[element_type]}"
-                element['id'] = element_id
+                if not element.get('id'):
+                    counters[element_type] += 1
+                    element['id'] = f"{element_type[0]}{counters[element_type]}"
         
         return elements
     

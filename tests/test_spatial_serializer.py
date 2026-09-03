@@ -70,7 +70,7 @@ def test_basic_sdom():
     <html>
     <body>
         <a href="/link">Link Text</a>
-        <input type="text" id="input1">
+        <input type="text">
         <button type="button">Button Text</button>
     </body>
     </html>
@@ -95,8 +95,8 @@ def test_id_convention():
         <a href="/link1">Link 1</a>
         <a href="/link2">Link 2</a>
         <a href="/link3">Link 3</a>
-        <input type="text" id="input1">
-        <input type="text" id="input2">
+        <input type="text">
+        <input type="text">
     </body>
     </html>
     """
@@ -111,6 +111,35 @@ def test_id_convention():
     assert 'l3' in interactive_ids
     assert 'i1' in interactive_ids
     assert 'i2' in interactive_ids
+
+
+def test_preserves_real_ids():
+    """Real element ids are preserved; only id-less elements get synthetic ids."""
+    serializer = SpatialSerializer()
+
+    html = """
+    <html>
+    <body>
+        <form id="signup">
+            <input type="email" id="email-address" name="email-address">
+            <input type="password" id="password">
+            <input type="text">
+            <button type="submit">Join</button>
+        </form>
+    </body>
+    </html>
+    """
+
+    sdom = serializer.to_sdom(html, "http://example.com/signup")
+
+    ids = [elem.id for elem in sdom.interactive]
+    # Real ids are preserved (previously overwritten to i1/i2).
+    assert "email-address" in ids
+    assert "password" in ids
+    # Id-less elements still get synthetic ids.
+    assert "i1" in ids
+    assert "b1" in ids
+
 
 def test_truncation():
     """Test text truncation for elements with long text."""
@@ -155,8 +184,8 @@ def test_form_detection():
     form = sdom.forms[0]
     assert form.id == "login-form"
     assert len(form.fields) == 2
-    assert "i1" in form.fields  # email input gets SDOM id i1
-    assert "i2" in form.fields  # password input gets SDOM id i2
+    assert "email-field" in form.fields  # real id preserved
+    assert "password-field" in form.fields  # real id preserved
     assert form.submit_id == "b1"
 
 def test_content_sections():
