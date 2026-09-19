@@ -20,6 +20,8 @@ All three share the same MCP server, the same config file, and the same deployme
 
 > **Version:** v0.2.0 · **Tests:** 320 passing · **License:** MIT
 
+Every agent account is bound at onboarding to a named human sponsor, so Parousia records a declared **Registered Accountable Entity (RAE) at L0 (declared, unverified)** with actions attributable to that human rather than only to the agent — see the [RAE specification](https://github.com/o3willard-AI/RAE) and [docs/accountability.md](docs/accountability.md).
+
 ---
 
 ## What you need
@@ -148,6 +150,7 @@ Full component interactions and request lifecycle: **[docs/architecture.md](docs
 | [Temporal Guide](docs/capabilities/temporal.md) | All 6 temporal tools, DSL format reference, conflict resolution rules |
 | [Spatial Guide](docs/capabilities/spatial.md) | All 3 spatial tools, SDOM format reference, browser pool internals |
 | [Architecture](docs/architecture.md) | Full system diagram, component contracts, life-of-an-email, life-of-an-MCP-call |
+| [Accountability (RAE)](docs/accountability.md) | The human sponsor behind every agent action; L0 (declared) assurance model and claim boundary |
 | [Hosting Notes](docs/hosting.md) | Provider-specific notes: AWS (SES, port 25), Hetzner, DigitalOcean, Linode |
 | [Changelog](DONE.md) | Completed features by story |
 
