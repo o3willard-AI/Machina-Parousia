@@ -18,6 +18,8 @@ class Account:
     status: str = "active"
     email: str = ""
     email_verified: bool = False
+    sponsor_id: str = ""
+    sponsor_contact: str = ""
     created_at: str = ""
     last_seen_at: str = ""
     rate_limit_per_hour: int = 20
@@ -42,6 +44,7 @@ class AccountStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
+        self._migrate()
 
     def _create_tables(self):
         self._conn.executescript("""
@@ -53,6 +56,8 @@ class AccountStore:
                 status TEXT NOT NULL DEFAULT 'active',
                 email TEXT NOT NULL DEFAULT '',
                 email_verified INTEGER NOT NULL DEFAULT 0,
+                sponsor_id TEXT NOT NULL DEFAULT '',
+                sponsor_contact TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 last_seen_at TEXT NOT NULL DEFAULT '',
                 rate_limit_per_hour INTEGER NOT NULL DEFAULT 20,
@@ -92,6 +97,28 @@ class AccountStore:
         """)
         self._conn.commit()
 
+    def _migrate(self):
+        """Add sponsor columns to pre-existing (non-sponsor) accounts tables.
+
+        CREATE TABLE IF NOT EXISTS does not alter an existing table, so a DB
+        created before the RAE change would be missing ``sponsor_id`` and
+        ``sponsor_contact``. Inspect the live schema and add the columns
+        conditionally — existing rows are never dropped or rewritten.
+        """
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
+        }
+        if "sponsor_id" not in columns:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN sponsor_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "sponsor_contact" not in columns:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN sponsor_contact TEXT NOT NULL DEFAULT ''"
+            )
+        self._conn.commit()
+
     # ── Key hashing ───────────────────────────────
 
     @staticmethod
@@ -111,6 +138,7 @@ class AccountStore:
     def create_account(
         self, account_id: str, tier: str = "free",
         email: str = "", display_name: str = "",
+        sponsor_id: str = "", sponsor_contact: str = "",
     ):
         """Create an account and return (account, raw_api_key)."""
         api_key = self.generate_key()
@@ -119,8 +147,10 @@ class AccountStore:
 
         self._conn.execute(
             """INSERT INTO accounts (account_id, display_name, api_key_hash,
-               tier, email, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
-            (account_id, display_name, key_hash, tier, email, now),
+               tier, email, created_at, sponsor_id, sponsor_contact)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (account_id, display_name, key_hash, tier, email, now,
+             sponsor_id, sponsor_contact),
         )
         self._conn.execute(
             "INSERT INTO api_key_events (account_id, event_type, key_hash, created_at) "
@@ -146,6 +176,8 @@ class AccountStore:
             status=row["status"],
             email=row["email"],
             email_verified=bool(row["email_verified"]),
+            sponsor_id=row["sponsor_id"],
+            sponsor_contact=row["sponsor_contact"],
             created_at=row["created_at"],
             last_seen_at=row["last_seen_at"],
             rate_limit_per_hour=row["rate_limit_per_hour"],

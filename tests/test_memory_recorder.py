@@ -404,3 +404,48 @@ class TestMemoryRecorder:
         latch.set()
         recorder.shutdown()
         assert done.is_set() or not recorder._sync_thread.is_alive()
+
+
+class TestSponsorAttribution:
+    """RAE: a recorded tool call names the human sponsor alongside the agent."""
+
+    def test_record_tool_call_includes_sponsor_in_fact(self):
+        """The sponsor is appended to the Mem0 fact content (names the human)."""
+        recorder = MemoryRecorder(Mem0Config(user_id_prefix="parousia-"))
+        mock_memory = MagicMock()
+        recorder._get_memory = lambda: mock_memory
+
+        recorder.record_tool_call(
+            "send_email",
+            {"to": "a@b.com", "subject": "Hello"},
+            {"sent": True, "message_id": "abc"},
+            "hermes",
+            "mark (mark@example.com)",
+        )
+        if recorder._sync_thread:
+            recorder._sync_thread.join(timeout=2.0)
+
+        args, kwargs = mock_memory.add.call_args
+        content = args[0][0]["content"]
+        assert "sponsor: mark (mark@example.com)" in content
+        assert kwargs["user_id"] == "parousia-hermes"
+
+    def test_record_tool_call_without_sponsor_omits_it(self):
+        """No sponsor passed → the fact names only the agent (no sponsor suffix)."""
+        recorder = MemoryRecorder(Mem0Config())
+        mock_memory = MagicMock()
+        recorder._get_memory = lambda: mock_memory
+
+        recorder.record_tool_call(
+            "send_email",
+            {"to": "a@b.com", "subject": "Hello"},
+            {"sent": True, "message_id": "abc"},
+            "hermes",
+        )
+        if recorder._sync_thread:
+            recorder._sync_thread.join(timeout=2.0)
+
+        args, kwargs = mock_memory.add.call_args
+        content = args[0][0]["content"]
+        assert "sponsor:" not in content
+        assert kwargs["user_id"] == "parousia-hermes"

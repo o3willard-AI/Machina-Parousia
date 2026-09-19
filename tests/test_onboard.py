@@ -182,3 +182,35 @@ class TestAccount:
         # Endpoint not in test fixture app — returns 404. In production, this
         # would be a 401 before the invite-gated middleware, so we accept 404.
         assert resp.status_code in (401, 404)
+
+
+class TestSponsorPropagation:
+    """Onboarding binds the invite's sponsor onto the new account (RAE)."""
+
+    def _onboard(self, client, stores, account_id, invite_key):
+        client.post("/onboard", json={
+            "account_id": account_id,
+            "invite_code": invite_key,
+        })
+        account_store, _ = stores
+        return account_store.get_account(account_id)
+
+    def test_onboard_copies_invite_sponsor_to_account(self, client, stores):
+        """An account onboarded via handle_onboard carries the invite's sponsor."""
+        _, invites = stores
+        key = invites.create(
+            sponsor_id="mark", sponsor_contact="mark@example.com"
+        ).invite_code
+        acct = self._onboard(client, stores, "sponsor-ok", key)
+        assert acct is not None
+        assert acct.sponsor_id == "mark"
+        assert acct.sponsor_contact == "mark@example.com"
+
+    def test_onboard_invite_with_contact_only_sponsor_id(self, client, stores):
+        """sponsor_id (no contact) still propagates from the invite."""
+        _, invites = stores
+        key = invites.create(sponsor_id="stephen", sponsor_contact="").invite_code
+        acct = self._onboard(client, stores, "sponsor-nocontact", key)
+        assert acct is not None
+        assert acct.sponsor_id == "stephen"
+        assert acct.sponsor_contact == ""

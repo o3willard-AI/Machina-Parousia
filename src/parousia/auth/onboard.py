@@ -38,15 +38,24 @@ def handle_onboard(
     if store.account_exists(request.account_id):
         raise HTTPException(status_code=409, detail=f"Account '{request.account_id}' already exists")
 
-    # 3. Create account
+    # 3. Look up the invite so its sponsor can be bound to the account (RAE).
+    #    Looked up before consumption so the sponsor is available even though
+    #    consume() marks the invite used immediately after account creation.
+    invite = invite_store.get(request.invite_code)
+    sponsor_id = invite.sponsor_id if invite else ""
+    sponsor_contact = invite.sponsor_contact if invite else ""
+
+    # 4. Create account
     account, api_key = store.create_account(
         account_id=request.account_id,
         tier="free",
         email=request.email,
         display_name=request.display_name,
+        sponsor_id=sponsor_id,
+        sponsor_contact=sponsor_contact,
     )
 
-    # 4. Consume the invite key
+    # 5. Consume the invite key
     invite_store.consume(request.invite_code, request.account_id)
 
     return OnboardResponse(
