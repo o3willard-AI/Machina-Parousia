@@ -97,3 +97,28 @@ def test_create_duplicate_raises(store):
     store.create_account("dupe")
     with pytest.raises(Exception):
         store.create_account("dupe")
+
+
+# ── RAE: sponsor attribution ─────────────────────
+
+def test_create_with_sponsor_roundtrip(store):
+    """create_account persists sponsor_id/contact; get_account returns them."""
+    account, _ = store.create_account(
+        "agent-sponsor", tier="free",
+        sponsor_id="mark", sponsor_contact="mark@example.com",
+    )
+    assert account.sponsor_id == "mark"
+    assert account.sponsor_contact == "mark@example.com"
+    fetched = store.get_account("agent-sponsor")
+    assert fetched is not None
+    assert fetched.sponsor_id == "mark"
+    assert fetched.sponsor_contact == "mark@example.com"
+
+
+def test_create_without_sponsor_defaults_empty(store):
+    """Accounts created without a sponsor get empty sponsor fields."""
+    store.create_account("agent-nosponsor")
+    fetched = store.get_account("agent-nosponsor")
+    assert fetched is not None
+    assert fetched.sponsor_id == ""
+    assert fetched.sponsor_contact == ""

@@ -46,3 +46,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# multi_agent_mem0_test.py is a standalone deployment harness (runs against
+# Parousia AWS Qdrant with sudo/systemctl). It is not a unit test and its
+# module-level body (sys.exit at the end) breaks pytest collection locally.
+addopts = "--ignore=tests/multi_agent_mem0_test.py"
