@@ -39,6 +39,97 @@ def test_create_and_get(store):
     assert fetched.account_id == "agent-1"
 
 
+def test_get_account_returns_sponsor_after_create(store):
+    """create_account persists the sponsor; get_account returns it.
+
+    Mutation check: if the sponsor column/field is removed, sponsor_id and
+    sponsor_contact come back empty and this assertion fails.
+    """
+    account, _ = store.create_account(
+        "agent-sponsor",
+        sponsor_id="sponsor-mark",
+        sponsor_contact="mark@corp.example",
+    )
+    assert account.sponsor_id == "sponsor-mark"
+    assert account.sponsor_contact == "mark@corp.example"
+
+    fetched = store.get_account("agent-sponsor")
+    assert fetched is not None
+    assert fetched.sponsor_id == "sponsor-mark"
+    assert fetched.sponsor_contact == "mark@corp.example"
+
+
+def test_create_account_sponsor_defaults_empty(store):
+    """Sponsor fields default to empty when not provided."""
+    account, _ = store.create_account("agent-nosponsor")
+    assert account.sponsor_id == ""
+    assert account.sponsor_contact == ""
+
+
+def test_migrate_adds_sponsor_columns_keeps_rows(tmp_path):
+    """A pre-sponsor accounts.db is migrated in place.
+
+    Build the OLD accounts table (no sponsor columns), insert a live row, then
+    open it through AccountStore. The migration must add both sponsor columns
+    without dropping or corrupting the existing row.
+
+    Mutation check: if the migration ALTERs aren't conditional (or don't run),
+    the column assertion below fails.
+    """
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE accounts (
+            account_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL DEFAULT '',
+            api_key_hash TEXT NOT NULL,
+            tier TEXT NOT NULL DEFAULT 'free',
+            status TEXT NOT NULL DEFAULT 'active',
+            email TEXT NOT NULL DEFAULT '',
+            email_verified INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL DEFAULT '',
+            rate_limit_per_hour INTEGER NOT NULL DEFAULT 20,
+            browser_max_instances INTEGER NOT NULL DEFAULT 1,
+            storage_bytes_used INTEGER NOT NULL DEFAULT 0,
+            metadata TEXT NOT NULL DEFAULT '{}'
+        );
+    """)
+    key_hash = AccountStore.hash_key("po_legacy_key")
+    conn.execute(
+        "INSERT INTO accounts (account_id, api_key_hash, created_at) VALUES (?, ?, ?)",
+        ("legacy-1", key_hash, "2026-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    store = AccountStore(str(db))
+    store.connect()  # runs migration in place
+
+    cols = {r[1] for r in store._conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    assert "sponsor_id" in cols
+    assert "sponsor_contact" in cols
+
+    legacy = store.get_account("legacy-1")
+    assert legacy is not None
+    assert legacy.account_id == "legacy-1"
+    # Existing row survives; new sponsor columns default to empty.
+    assert legacy.sponsor_id == ""
+    assert legacy.sponsor_contact == ""
+
+    # Migration is idempotent — reconnecting does not error or duplicate.
+    store.close()
+    store2 = AccountStore(str(db))
+    store2.connect()
+    cols2 = {r[1] for r in store2._conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    assert "sponsor_id" in cols2
+    assert "sponsor_contact" in cols2
+    assert store2.get_account("legacy-1") is not None
+    store2.close()
+
+
 # ── Authentication ──────────────────────────────
 
 def test_authenticate_success(store):

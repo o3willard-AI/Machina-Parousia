@@ -64,6 +64,30 @@ class TestInviteGatedOnboard:
         assert data["tier"] == "free"
         assert data["api_key"].startswith("po_")
 
+    def test_onboard_carries_invite_sponsor_onto_account(self, stores, client):
+        """Account created via handle_onboard inherits the invite's sponsor.
+
+        Mutation check: if the propagation is removed (sponsor dropped at
+        onboarding), sponsor_id/sponsor_contact come back empty and this
+        assertion fails.
+        """
+        account_store, invite_store = stores
+        code = invite_store.create(
+            sponsor_id="sponsor-jane",
+            sponsor_contact="jane@corp.example",
+        ).invite_code
+
+        resp = client.post("/onboard", json={
+            "account_id": "agent-sponsor",
+            "invite_code": code,
+        })
+        assert resp.status_code == 200
+
+        acct = account_store.get_account("agent-sponsor")
+        assert acct is not None
+        assert acct.sponsor_id == "sponsor-jane"
+        assert acct.sponsor_contact == "jane@corp.example"
+
     def test_onboard_without_invite_rejected(self, client):
         resp = client.post("/onboard", json={"account_id": "no-invite"})
         assert resp.status_code == 422  # Pydantic validation — invite_code required
