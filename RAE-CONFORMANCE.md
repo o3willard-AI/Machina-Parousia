@@ -21,7 +21,7 @@ Machina Parousia displays an RAE at L0 (declared, unverified):
   Account, and recorded write-side actions (email / temporal / spatial) name
   the sponsor — so every agent action is attributed to a *declared* human, not
   only to an agent identity. The invite → account binding is recorded at
-  creation and is tamper-evident within the account store.
+  creation and is persisted in the account store.
 - **What is missing for L1:** the sponsor is self-declared and not verified —
   no organization-verified identity, and no signing credential bound to the
   sponsor's authorization records. Parousia will not claim L1 until an

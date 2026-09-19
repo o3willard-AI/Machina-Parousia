@@ -51,7 +51,7 @@ exact claim boundary.
 
 L0 is still worth having: an unverified-but-recorded sponsor is a name an
 operator can act on, a trail a reviewer can follow, and — because the invite is
-signed into the account at creation — a *tamper-evident* declaration of who
+recorded into the account at creation — a durable declaration of who
 vouched for an agent and when. A false sponsor declaration is an
 invite-trust problem (the human who generated the key vouched for it), not an
 audit-integrity problem. Verifying sponsor identity would raise the claim to
