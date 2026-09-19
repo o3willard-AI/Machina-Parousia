@@ -197,6 +197,7 @@ class MemoryRecorder:
         arguments: dict,
         result: dict,
         agent_id: str,
+        sponsor: str = "",
     ) -> None:
         """Record a tool call as a Mem0 fact (fire-and-forget).
 
@@ -205,6 +206,10 @@ class MemoryRecorder:
             arguments: Tool call arguments
             result: Parsed JSON result from the tool handler
             agent_id: Parousia agent ID (e.g. 'hermes')
+            sponsor: Human sponsor (RAE L0, self-declared) accountable for the
+                action. Embedded in the fact so each recorded action names the
+                human, not just the agent. Empty string when there is no
+                account or sponsor.
         """
         if self._is_breaker_open():
             return
@@ -221,6 +226,12 @@ class MemoryRecorder:
 
         if fact is None:
             return  # Formatter chose to skip (read-only tool, empty result, etc.)
+
+        # RAE L0 attribution: name the accountable human in the fact itself.
+        # The sponsor is self-declared (never verified) and carries no
+        # credential material — no-secret property.
+        if sponsor:
+            fact = f"{fact} [sponsored by {sponsor}]"
 
         # Fire and forget on background thread
         mem0_user_id = f"{self._config.user_id_prefix}{agent_id}"

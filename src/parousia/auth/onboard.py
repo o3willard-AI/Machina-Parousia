@@ -34,6 +34,12 @@ def handle_onboard(
     if not ok:
         raise HTTPException(status_code=400, detail=f"Invalid invite code: {reason}")
 
+    # 1b. RAE L0: carry the invite's sponsor onto the new account (before
+    # the invite is consumed). Sponsor is self-declared at invite time.
+    invite = invite_store.get(request.invite_code)
+    if invite is None:
+        raise HTTPException(status_code=400, detail="Invalid invite code")
+
     # 2. Check for duplicate account
     if store.account_exists(request.account_id):
         raise HTTPException(status_code=409, detail=f"Account '{request.account_id}' already exists")
@@ -44,6 +50,8 @@ def handle_onboard(
         tier="free",
         email=request.email,
         display_name=request.display_name,
+        sponsor_id=invite.sponsor_id,
+        sponsor_contact=invite.sponsor_contact,
     )
 
     # 4. Consume the invite key

@@ -167,6 +167,11 @@ def _build_server() -> tuple[Server, AccountStore]:
         else:
             agent_id_override = None
 
+        # RAE L0: attribute every recorded action to the authenticated account's
+        # human sponsor (empty string when there is no account or sponsor).
+        sponsor = account.sponsor_id if account and account.sponsor_id else ""
+        agent_id = agent_id_override or _resolve_agent_id(config, arguments)
+
         # ── Phase 1: send_email ────────────────────
         if name == "send_email":
             # account is the authenticated Account (None on stdio w/o auth).
@@ -177,13 +182,12 @@ def _build_server() -> tuple[Server, AccountStore]:
             try:
                 memory_recorder.record_tool_call(
                     "send_email", arguments,
-                    json.loads(result_content[0].text), agent_id
+                    json.loads(result_content[0].text), agent_id,
+                    sponsor=sponsor,
                 )
             except Exception:
                 pass
             return result_content
-
-        agent_id = agent_id_override or _resolve_agent_id(config, arguments)
 
         # ── Story F: check_inbox ────────────────
         if name == "check_inbox":
@@ -209,7 +213,7 @@ def _build_server() -> tuple[Server, AccountStore]:
                 text=json.dumps(result_dict),
             )]
             try:
-                memory_recorder.record_tool_call("check_inbox", arguments, result_dict, agent_id)
+                memory_recorder.record_tool_call("check_inbox", arguments, result_dict, agent_id, sponsor=sponsor)
             except Exception:
                 pass
             return result
@@ -220,7 +224,7 @@ def _build_server() -> tuple[Server, AccountStore]:
             result_str = temporal_handlers.dispatch(name, arguments, agent_id)
             result = [TextContent(type="text", text=result_str)]
             try:
-                memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id)
+                memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id, sponsor=sponsor)
             except Exception:
                 pass
             return result
@@ -231,7 +235,7 @@ def _build_server() -> tuple[Server, AccountStore]:
             result_str = await spatial_handlers.dispatch(name, arguments, agent_id)
             result = [TextContent(type="text", text=result_str)]
             try:
-                memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id)
+                memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id, sponsor=sponsor)
             except Exception:
                 pass
             return result

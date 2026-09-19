@@ -24,6 +24,9 @@ class Account:
     browser_max_instances: int = 1
     storage_bytes_used: int = 0
     metadata: str = "{}"
+    # RAE L0: the human sponsor who invited this account (self-declared).
+    sponsor_id: str = ""
+    sponsor_contact: str = ""
 
 
 DEFAULT_DB_PATH = "/var/lib/parousia/accounts.db"
@@ -58,7 +61,9 @@ class AccountStore:
                 rate_limit_per_hour INTEGER NOT NULL DEFAULT 20,
                 browser_max_instances INTEGER NOT NULL DEFAULT 1,
                 storage_bytes_used INTEGER NOT NULL DEFAULT 0,
-                metadata TEXT NOT NULL DEFAULT '{}'
+                metadata TEXT NOT NULL DEFAULT '{}',
+                sponsor_id TEXT NOT NULL DEFAULT '',
+                sponsor_contact TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS api_key_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +96,29 @@ class AccountStore:
             CREATE INDEX IF NOT EXISTS idx_invite_sponsor ON invite_keys(sponsor_id);
         """)
         self._conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """Add the RAE sponsor columns to a pre-sponsor accounts table in place.
+
+        CREATE TABLE IF NOT EXISTS does not alter an existing table, so a
+        database created before sponsor tracking must be migrated: inspect
+        PRAGMA table_info(accounts) and add each missing column. Existing rows
+        are preserved (new columns default to '').
+        """
+        cols = {
+            r["name"]
+            for r in self._conn.execute("PRAGMA table_info(accounts)").fetchall()
+        }
+        if "sponsor_id" not in cols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN sponsor_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "sponsor_contact" not in cols:
+            self._conn.execute(
+                "ALTER TABLE accounts ADD COLUMN sponsor_contact TEXT NOT NULL DEFAULT ''"
+            )
+        self._conn.commit()
 
     # ── Key hashing ───────────────────────────────
 
@@ -111,6 +139,7 @@ class AccountStore:
     def create_account(
         self, account_id: str, tier: str = "free",
         email: str = "", display_name: str = "",
+        sponsor_id: str = "", sponsor_contact: str = "",
     ):
         """Create an account and return (account, raw_api_key)."""
         api_key = self.generate_key()
@@ -119,8 +148,10 @@ class AccountStore:
 
         self._conn.execute(
             """INSERT INTO accounts (account_id, display_name, api_key_hash,
-               tier, email, created_at) VALUES (?, ?, ?, ?, ?, ?)""",
-            (account_id, display_name, key_hash, tier, email, now),
+               tier, email, sponsor_id, sponsor_contact, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (account_id, display_name, key_hash, tier, email,
+             sponsor_id, sponsor_contact, now),
         )
         self._conn.execute(
             "INSERT INTO api_key_events (account_id, event_type, key_hash, created_at) "
@@ -152,6 +183,8 @@ class AccountStore:
             browser_max_instances=row["browser_max_instances"],
             storage_bytes_used=row["storage_bytes_used"],
             metadata=row["metadata"],
+            sponsor_id=row["sponsor_id"],
+            sponsor_contact=row["sponsor_contact"],
         )
 
     def authenticate(self, api_key: str) -> Optional[Account]:

@@ -381,6 +381,51 @@ class TestMemoryRecorder:
         # Should have been attempted
         assert call_count[0] == 6
 
+    def test_record_tool_call_includes_sponsor(self, monkeypatch):
+        """The human sponsor is recorded in the Mem0 fact.
+
+        Mutation check: if the sponsor-attribution step is removed, the fact
+        content names only the agent's action — this assertion on the sponsor
+        fails.
+        """
+        recorder = MemoryRecorder(Mem0Config())
+        mock_memory = MagicMock()
+        recorder._get_memory = lambda: mock_memory
+
+        recorder.record_tool_call(
+            "send_email",
+            {"to": "a@b.com", "subject": "Hi"},
+            {"sent": True, "message_id": "m1"},
+            "hermes",
+            sponsor="sponsor-mark",
+        )
+        if recorder._sync_thread:
+            recorder._sync_thread.join(timeout=2.0)
+
+        args, kwargs = mock_memory.add.call_args
+        content = args[0][0]["content"]
+        assert "sponsor-mark" in content
+        assert "sponsored by" in content
+
+    def test_record_tool_call_without_sponsor_has_no_sponsor(self, monkeypatch):
+        """When no sponsor is supplied the fact is not falsely attributed."""
+        recorder = MemoryRecorder(Mem0Config())
+        mock_memory = MagicMock()
+        recorder._get_memory = lambda: mock_memory
+
+        recorder.record_tool_call(
+            "send_email",
+            {"to": "a@b.com", "subject": "Hi"},
+            {"sent": True, "message_id": "m2"},
+            "hermes",
+        )
+        if recorder._sync_thread:
+            recorder._sync_thread.join(timeout=2.0)
+
+        args, kwargs = mock_memory.add.call_args
+        content = args[0][0]["content"]
+        assert "sponsored by" not in content
+
     def test_shutdown(self):
         """Shutdown waits for pending writes."""
         recorder = MemoryRecorder(Mem0Config())
