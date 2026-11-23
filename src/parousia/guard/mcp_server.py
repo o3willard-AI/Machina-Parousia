@@ -9,6 +9,7 @@ Supports two transports:
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 from typing import Any
@@ -36,6 +37,98 @@ from parousia.temporal.db import TemporalDB
 from parousia.temporal.tools import ALL_TEMPORAL_SCHEMAS, TemporalToolHandlers
 
 logger = logging.getLogger("parousia.mcp")
+
+# ── MP-1: SSE session→account map + session-id capture ─────────────
+#
+# _SESSION_ACCOUNTS maps the SSE session id (UUID assigned by the MCP
+# transport at GET /sse) → the Account authenticated there via Bearer
+# token.  Module-level because _build_server (which owns the tool
+# dispatch) runs before run_mcp_server_sse; one process serves one
+# transport, so a module-level map is also the simplest test surface.
+_SESSION_ACCOUNTS: dict[UUID, Account | None] = {}
+
+# Recorder for the session-id capture.  handle_sse sets a fresh list via
+# .set() around the transport's connect_sse(); the transport assigns
+# `session_id = uuid4()` and inserts it into `_read_stream_writers`
+# synchronously inside connect_sse — BEFORE yielding the streams — so the
+# insertion is observed by the recorder in the CONNECTING task's context.
+# Concurrent connections cannot cross-talk: contextvars are per-task, so
+# each handle_sse reads its own recorder.
+_session_capture: contextvars.ContextVar = contextvars.ContextVar(
+    "parousia_session_capture", default=None
+)
+
+
+class _ObservableWriterMap(dict):
+    """dict that reports insertions to the active session-capture recorder.
+
+    Replaces the SDK transport's plain `_read_stream_writers` dict so
+    handle_sse can capture the exact session id assigned to THIS
+    connection.  This removes the previous `list(...)[-1]`
+    grab-the-last-key hack, which mis-keys under concurrent connections
+    (dict insertion order is connection-arrival order, not THIS session).
+    """
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        recorder = _session_capture.get()
+        if recorder is not None:
+            recorder.append(key)
+
+
+def _request_from_mcp_context(server: Server) -> Any:
+    """The ASGI Request attached to the current MCP message, if any.
+
+    The SSE transport attaches the POST Request to every incoming message
+    (ServerMessageMetadata.request_context); the low-level Server exposes
+    it as ``server.request_context.request`` (mcp>=1.9; some versions name
+    the accessor get_request_context()).  Returns None on the stdio
+    transport (no request) and outside a message context.
+    """
+    try:
+        ctx = server.request_context
+    except LookupError:
+        return None
+    except AttributeError:
+        getter = getattr(server, "get_request_context", None)
+        if getter is None:
+            return None
+        try:
+            ctx = getter()
+        except LookupError:
+            return None
+    return getattr(ctx, "request", None)
+
+
+def _resolve_sse_account(server: Server) -> tuple[Account | None, bool]:
+    """Resolve the authenticated account for a tool call that arrived via SSE.
+
+    Returns ``(account, via_sse)``: ``via_sse`` is True when the call came
+    through the SSE POST endpoint (its Request carries a ``session_id``
+    query param).
+
+    Why not the auth contextvar alone: the contextvar set in the POST
+    wrapper does NOT cross the task boundary — the SDK runs tool handlers
+    from the SSE read stream in the session task's context (a copy of the
+    GET /sse task's context), not the POST task's.  So the account is
+    resolved through the message's own Request: its session_id keys
+    _SESSION_ACCOUNTS, populated at GET /sse after Bearer auth.
+    """
+    request = _request_from_mcp_context(server)
+    if request is None:
+        return None, False
+    try:
+        session_id_param = request.query_params.get("session_id")
+    except Exception:
+        return None, False
+    if not session_id_param:
+        # A Request without a session_id param is not an SSE POST.
+        return None, False
+    try:
+        sid = UUID(hex=session_id_param)
+    except ValueError:
+        return None, True
+    return _SESSION_ACCOUNTS.get(sid), True
 
 
 def _resolve_agent_id(config, arguments: dict) -> str:
@@ -150,6 +243,22 @@ def _build_server() -> tuple[Server, AccountStore]:
                 },
             },
         ))
+        # MP-1 (Fix 2): read_message — check_inbox only previews the body;
+        # this returns the full stored message by id.
+        tools.append(Tool(
+            name="read_message",
+            description="Read a full message by ID (returns the complete body).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "Message ID from check_inbox",
+                    },
+                },
+                "required": ["message_id"],
+            },
+        ))
         return tools
 
     # ── Tool dispatch ────────────────────────────────
@@ -158,14 +267,30 @@ def _build_server() -> tuple[Server, AccountStore]:
     async def handle_call_tool(
         name: str, arguments: dict[str, Any]
     ) -> list[TextContent]:
-        # ── Story D: MCP auth ──────────────────────
-        # SSE transport: account injected via context var.
-        # Stdio transport: auth optional — falls back to config.
+        # ── Story D + MP-1 (Fix 1): account scoping ──
+        # SSE transport: the account is authenticated at GET /sse (Bearer)
+        # and reaches dispatch through the message's own Request (see
+        # _resolve_sse_account — the POST wrapper's contextvar does not
+        # cross the task boundary). Stdio transport: auth optional —
+        # contextvar, then config fallback.
         account = get_auth_context()
-        if account:
-            agent_id_override = account.account_id
-        else:
-            agent_id_override = None
+        sse_account, via_sse = _resolve_sse_account(server)
+        if account is None:
+            account = sse_account
+        if via_sse and account is None:
+            # MP-1: fail closed. An SSE call with no authenticated account
+            # must NEVER fall back to config.agents[0] — that fallback is
+            # what scoped a failed auth to the first agent's inbox in the
+            # live incident. (Config fallback survives only on the
+            # stdio/no-auth path below.)
+            logger.error(
+                "SSE tool call rejected: no authenticated account (tool=%s)", name
+            )
+            return [TextContent(
+                type="text",
+                text=json.dumps({"error": "no authenticated account"}),
+            )]
+        agent_id_override = account.account_id if account else None
 
         # RAE L0: attribute every recorded action to the authenticated account's
         # human sponsor (empty string when there is no account or sponsor).
@@ -214,6 +339,42 @@ def _build_server() -> tuple[Server, AccountStore]:
             )]
             try:
                 memory_recorder.record_tool_call("check_inbox", arguments, result_dict, agent_id, sponsor=sponsor)
+            except Exception:
+                pass
+            return result
+
+        # ── MP-1 (Fix 2): read_message ────────
+        if name == "read_message":
+            message_id = arguments.get("message_id")
+            if not message_id:
+                result_dict = {"error": "message_id is required"}
+            else:
+                msg = inbox_store.get_message(message_id)
+                if msg is None:
+                    result_dict = {"error": "message not found"}
+                elif msg.agent_id != agent_id:
+                    # Agent isolation: never leak another agent's mail —
+                    # a message stored for a different agent_id reads as
+                    # "not your message", indistinguishable from absent.
+                    result_dict = {"error": "not your message"}
+                else:
+                    result_dict = {
+                        "id": msg.id,
+                        "sender": msg.sender,
+                        "recipient": msg.recipient,
+                        "subject": msg.subject,
+                        "body_text": msg.body_text,
+                        "body_html": msg.body_html,
+                        "received_at": msg.received_at,
+                        "read": msg.read,
+                        "archived": msg.archived,
+                    }
+            result = [TextContent(
+                type="text",
+                text=json.dumps(result_dict),
+            )]
+            try:
+                memory_recorder.record_tool_call("read_message", arguments, result_dict, agent_id, sponsor=sponsor)
             except Exception:
                 pass
             return result
@@ -405,11 +566,12 @@ async def run_mcp_server_sse(host: str = "0.0.0.0", port: int = 8081):
     server, account_store = _build_server()
     sse = SseServerTransport("/messages/")
 
-    # ── Per-session account mapping ───────────────────────────────
-    # Maps session_id (UUID) → authenticated Account | None.
-    # Populated at GET /sse (connection time); consumed at POST /messages
-    # (tool-call time) to inject the contextvar into dispatch.
-    _session_accounts: dict[UUID, Account | None] = {}
+    # MP-1 (Fix 1): observe the session ids the transport assigns. The SDK
+    # inserts its `session_id = uuid4()` into `_read_stream_writers`
+    # synchronously inside connect_sse(), before yielding the streams, so
+    # handle_sse can capture the exact id assigned to THIS connection (see
+    # _ObservableWriterMap) instead of guessing `list(...)[-1]`.
+    sse._read_stream_writers = _ObservableWriterMap(sse._read_stream_writers)
 
     async def handle_sse(request):
         """GET /sse — authenticate via Bearer token, then run the SSE transport."""
@@ -433,27 +595,47 @@ async def run_mcp_server_sse(host: str = "0.0.0.0", port: int = 8081):
             )
 
         # Open the SSE connection; the transport assigns a session_id.
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            # SseServerTransport._read_stream_writers gets a new entry on connect.
-            session_id = list(sse._read_stream_writers.keys())[-1]
-            _session_accounts[session_id] = account
-            try:
-                await server.run(
-                    streams[0], streams[1],
-                    server.create_initialization_options(),
-                )
-            finally:
-                _session_accounts.pop(session_id, None)
+        # MP-1: capture the id THIS connection was assigned via the
+        # observable writer map (per-task recorder — safe under concurrent
+        # connections), never `list(...)[-1]`.
+        capture: list[UUID] = []
+        capture_token = _session_capture.set(capture)
+        try:
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                _session_capture.reset(capture_token)
+                capture_token = None
+                if not capture:
+                    # Cannot happen with the SDK's connect_sse (it always
+                    # inserts exactly one session id before yielding), but
+                    # fail loudly rather than mis-scope if that ever changes.
+                    logger.error("failed to capture the MCP session id at GET /sse")
+                    return JSONResponse(
+                        status_code=500,
+                        content={"detail": "failed to capture MCP session id"},
+                    )
+                session_id = capture[-1]
+                _SESSION_ACCOUNTS[session_id] = account
+                try:
+                    await server.run(
+                        streams[0], streams[1],
+                        server.create_initialization_options(),
+                    )
+                finally:
+                    _SESSION_ACCOUNTS.pop(session_id, None)
+        finally:
+            if capture_token is not None:
+                _session_capture.reset(capture_token)
         return Response()
 
     # ── Wrapped POST handler: inject account into contextvar ─────
-    # The MCP SDK's ContextSendStream captures contextvars.copy_context() at
-    # send() time; _spawn() then runs handlers via sender_ctx.run(...).
-    # So setting the contextvar HERE (in the POST handler, before the message
-    # enters the read stream) propagates into handle_call_tool's
-    # get_auth_context() call.
+    # NOTE (MP-1): this contextvar injection is kept for in-process
+    # harnesses and any SDK version that runs tool handlers in the POST
+    # request's context. It does NOT reach the dispatch task on the
+    # current SDK (handlers run from the SSE read stream in the session
+    # task's context) — the authoritative SSE path is the message's own
+    # Request → session_id → _SESSION_ACCOUNTS (see _resolve_sse_account).
     _original_post = sse.handle_post_message
 
     async def handle_post_message(scope, receive, send):
@@ -464,7 +646,7 @@ async def run_mcp_server_sse(host: str = "0.0.0.0", port: int = 8081):
         if session_id_param:
             try:
                 sid = UUID(hex=session_id_param)
-                account = _session_accounts.get(sid)
+                account = _SESSION_ACCOUNTS.get(sid)
                 if account is not None:
                     set_auth_context(account)
             except ValueError:
