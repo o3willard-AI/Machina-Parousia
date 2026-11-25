@@ -240,8 +240,10 @@ class MemoryRecorder:
             try:
                 memory = self._get_memory()
                 messages = [{"role": "user", "content": fact}]
-                # Use infer=False when no LLM is configured (embed-only mode)
-                infer = bool(self._config.llm_provider)
+                # infer=False (the default) stores the fact verbatim — no
+                # LLM is contacted. infer=True enables mem0's fact
+                # extraction (configures the LLM; see Mem0Config).
+                infer = self._config.infer
                 memory.add(
                     messages,
                     user_id=mem0_user_id,
