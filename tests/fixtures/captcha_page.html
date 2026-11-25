@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Enrollment fixture — invisible reCAPTCHA v2</title>
+</head>
+<body>
+  <!-- MP-4 captcha fixture: same form shape as dump_form_page.html, plus
+       an invisible reCAPTCHA v2 widget (the Empower case: data-size
+       invisible, real sitekey placeholder value). -->
+  <form id="enroll" name="enroll_form" method="post" action="/enroll">
+    <label for="email">Email address</label>
+    <input id="email" type="text" name="email" required maxlength="100">
+
+    <input type="hidden" name="csrf" value="tok-123">
+
+    <label for="sectors">Sectors (pick your areas)</label>
+    <select id="sectors" name="sectors" multiple size="5">
+      <option value="fin">Financial Services</option>
+      <option value="health" selected>Healthcare</option>
+      <option value="edu">Education</option>
+    </select>
+
+    <button type="submit" name="submit" value="go">Sign up</button>
+  </form>
+
+  <div class="g-recaptcha"
+       data-sitekey="6Lfixture_sitekey_not_real"
+       data-size="invisible"></div>
+</body>
+</html>

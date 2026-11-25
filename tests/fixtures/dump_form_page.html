@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Enrollment fixture — no captcha</title>
+</head>
+<body>
+  <!-- MP-4 fixture: the DONE-gate form. No captcha on this page (the
+       captcha variant lives in captcha_page.html). -->
+  <form id="enroll" name="enroll_form" method="post" action="/enroll">
+    <label for="email">Email address</label>
+    <input id="email" type="text" name="email" required
+           maxlength="100" pattern="[^@]+@[^@]+"
+           placeholder="you@example.com" value="ricky@grid.example">
+
+    <label for="age">Age</label>
+    <input id="age" type="number" name="age" min="18" max="99">
+
+    <label for="password">Account password</label>
+    <input id="password" type="password" name="password" value="prefilled-secret">
+
+    <input type="hidden" name="csrf" value="tok-123">
+
+    <label for="sectors">Sectors (pick your areas)</label>
+    <select id="sectors" name="sectors" multiple size="5">
+      <option value="fin">Financial Services</option>
+      <option value="health" selected>Healthcare</option>
+      <option value="edu">Education</option>
+      <option value="tech">Technology</option>
+      <option value="energy">Energy</option>
+    </select>
+
+    <fieldset>
+      <legend>Plan</legend>
+      <input type="radio" id="plan-free" name="plan" value="free">
+      <label for="plan-free">Free tier</label>
+      <input type="radio" id="plan-pro" name="plan" value="pro" checked>
+      <label for="plan-pro">Professional</label>
+      <input type="radio" id="plan-ent" name="plan" value="ent">
+      <label for="plan-ent">Enterprise</label>
+    </fieldset>
+
+    <input type="checkbox" id="notify" name="notify[]" value="yes">
+    <label for="notify">Notify me by email</label>
+
+    <label>Notes
+      <textarea id="notes" name="notes" minlength="2"
+                placeholder="Optional notes"></textarea>
+    </label>
+
+    <button type="submit" name="submit" value="go">Sign up</button>
+  </form>
+
+  <!-- Second tiny form: exercises form_count / grouping. -->
+  <form id="search" name="search_form" method="get" action="/search">
+    <input id="q" type="text" name="q" placeholder="Search…">
+  </form>
+
+  <script>
+    // Simulates Empower's SILENT JS cap: declared nowhere in the HTML,
+    // enforced only here. The probe_limits runtime probe exists to see
+    // exactly this — 3, while option_count is 5.
+    (function () {
+      var CAP = 3;
+      function enforce() {
+        var el = document.getElementById('sectors');
+        var sel = Array.prototype.filter.call(
+          el.options, function (o) { return o.selected; });
+        for (var i = 0; i < sel.length - CAP; i++) sel[i].selected = false;
+      }
+      var s = document.getElementById('sectors');
+      s.addEventListener('change', enforce);
+      s.addEventListener('input', enforce);
+      s.addEventListener('click', function (e) {
+        if (e.target && e.target.tagName === 'OPTION') enforce();
+      });
+    })();
+  </script>
+</body>
+</html>
