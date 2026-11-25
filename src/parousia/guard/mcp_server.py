@@ -32,6 +32,7 @@ from parousia.auth.mcp_auth import authenticate_mcp, get_auth_context, set_auth_
 from parousia.config import load_config
 from parousia.guard.email_sender import send_email as _smtp_send
 from parousia.guard.rate_limiter import RateLimiter
+from parousia.inbox.wait_for import wait_for_email as _wait_for_email
 from parousia.spatial.browser_pool import BrowserPoolManager
 from parousia.spatial.serializer import SpatialSerializer
 from parousia.spatial.tools import ALL_SPATIAL_SCHEMAS, SpatialToolHandlers
@@ -277,6 +278,35 @@ def _build_server() -> tuple[Server, AccountStore]:
                 "required": ["message_id"],
             },
         ))
+        # MP-6 (part A): wait_for_email — couple the browser to the inbox
+        # (double opt-in). Polls the caller's OWN inbox for a matching
+        # message and surfaces the body links so the agent can browse_to
+        # the confirmation link directly.
+        tools.append(Tool(
+            name="wait_for_email",
+            description=(
+                "Wait for an email matching a pattern (case-insensitive "
+                "substring on subject OR sender) to arrive in YOUR inbox, "
+                "within a timeout. Returns the message plus its body links "
+                "(so you can browse_to a confirmation link), or "
+                '{"found": false} on timeout.'
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Substring to match on subject or sender (case-insensitive)",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Overall bound in ms. Default 30000, cap 120000.",
+                        "default": 30000,
+                    },
+                },
+                "required": ["pattern"],
+            },
+        ))
         return tools
 
     # ── Tool dispatch ────────────────────────────────
@@ -395,6 +425,25 @@ def _build_server() -> tuple[Server, AccountStore]:
                 memory_recorder.record_tool_call("read_message", arguments, result_dict, agent_id, sponsor=sponsor)
             except Exception:
                 pass
+            return result
+
+        # ── MP-6 (part A): wait_for_email ─────────────
+        if name == "wait_for_email":
+            pattern = arguments.get("pattern", "")
+            timeout_ms = arguments.get("timeout_ms", 30000)
+            # Account-scoped by construction: the helper polls
+            # inbox_store.list_messages(agent_id) — only this agent's mail.
+            result_dict = await _wait_for_email(
+                inbox_store, agent_id, pattern, timeout_ms
+            )
+            result = [TextContent(
+                type="text",
+                text=json.dumps(result_dict),
+            )]
+            # No fact recorded: the result carries message bodies (a
+            # confirmation mail is not a presence fact; a found/timeout
+            # summary alone would be noise — and the helper's message
+            # content must never flow into the memory layer unfiltered).
             return result
 
         # ── Phase 2: temporal tools ────────────────

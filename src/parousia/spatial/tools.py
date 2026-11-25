@@ -9,8 +9,10 @@ there). ``dispatch`` and every ``_handle_*`` method are coroutines.
 
 import json
 import logging
+import os
 import re
 import socket
+import tempfile
 from typing import Any, Optional
 
 from parousia.config import ParousiaConfig
@@ -382,6 +384,149 @@ def _assemble_form_report(raw: Optional[dict]) -> dict:
     return {"form_count": raw.get("form_count", len(forms)), "forms": forms}
 
 
+# ── MP-6 (part B): failure forensics — block-vendor detection ─────
+
+
+# Block-vendor markers, checked most-specific-first. Header markers are
+# stronger than body text (a legit page may mention a vendor by name), so
+# headers classify first; body phrases are the CloudFront "The request
+# could not be satisfied" style — distinctive enough to be trusted.
+_BLOCK_HEADER_MARKERS: list[tuple[str, tuple[str, ...]]] = [
+    # CloudFront: the canonical WAF refusal header.
+    ("cloudfront", ("x-cache",)),
+    ("cloudflare", ("cf-ray", "cf-mitigated", "cf-cache-status")),
+    ("akamai", ("x-akamai",)),
+]
+_BLOCK_BODY_MARKERS: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "cloudfront",
+        (
+            "the request could not be satisfied",
+            "error from cloudfront",
+        ),
+    ),
+    (
+        "cloudflare",
+        (
+            "just a moment",
+            "attention required! | cloudflare",
+            "checking your browser before accessing",
+        ),
+    ),
+    (
+        "akamai",
+        (
+            "access denied",
+            "akamai",
+        ),
+    ),
+]
+
+
+def _classify_block_headers(headers: Optional[dict]) -> str:
+    """Classify a block vendor from response headers ("" → unknown)."""
+    if not headers:
+        return ""
+    lowered = {str(k).lower(): str(v).lower() for k, v in headers.items()}
+    for vendor, keys in _BLOCK_HEADER_MARKERS:
+        for key in keys:
+            # Akamai ships many x-akamai-* headers; prefix-match the family.
+            hit = key in lowered or any(
+                h.startswith(key + "-") for h in lowered
+            )
+            if not hit:
+                continue
+            # x-cache is present on every CloudFront response (HITs too) —
+            # only the ERROR refusal marks a block, not a cache HIT.
+            if key == "x-cache":
+                if "error from cloudfront" in lowered.get(key, ""):
+                    return vendor
+                continue
+            return vendor
+    return ""
+
+
+def _classify_block_text(text: Optional[str]) -> str:
+    """Classify a block vendor from page text ("" → unknown)."""
+    if not text:
+        return ""
+    low = text.lower()[:6000]
+    for vendor, phrases in _BLOCK_BODY_MARKERS:
+        for phrase in phrases:
+            if phrase in low:
+                return vendor
+    return ""
+
+
+async def _detect_block_vendor(page: Any, response: Any = None) -> str:
+    """Detect which WAF/CDN (if any) refused the request.
+
+    Headers first (strongest signal — ``x-cache: Error from cloudfront``
+    is CloudFront's own refusal marker), then the page body's tell-tale
+    phrases ("The request could not be satisfied", "Just a moment…",
+    Akamai's "Access Denied"). ``none`` when nothing matches.
+    """
+    headers = {}
+    try:
+        if response is not None:
+            raw_headers = response.headers or {}
+            headers = dict(raw_headers)
+    except Exception:
+        headers = {}
+    vendor = _classify_block_headers(headers)
+    if vendor:
+        return vendor
+    text = ""
+    try:
+        text = await page.evaluate(
+            "() => document.body ? document.body.innerText : ''"
+        )
+    except Exception:
+        text = ""
+    return _classify_block_text(text) or "none"
+
+
+async def _failure_forensics(page: Any, response: Any = None) -> dict:
+    """Forensic evidence for a failed/refused browser operation.
+
+    MP-6: the difference between "the tool is broken" and "the site is
+    refusing us" — block vendor, a screenshot on disk, and a truncated DOM
+    snapshot. Every leg is best-effort: a forensics failure must never
+    mask the original tool error, so each piece degrades to None/"none".
+    """
+    out: dict = {"block_vendor": "none", "screenshot_path": None, "dom_snapshot": None}
+    try:
+        out["block_vendor"] = await _detect_block_vendor(page, response)
+    except Exception:
+        pass
+    try:
+        fd, path = tempfile.mkstemp(prefix="parousia-fail-", suffix=".png")
+        os.close(fd)
+        await page.screenshot(path=path)
+        out["screenshot_path"] = path
+    except Exception:
+        pass
+    try:
+        text = await page.evaluate(
+            "() => document.body ? document.body.innerText : ''"
+        )
+        out["dom_snapshot"] = (text or "")[:2048]
+    except Exception:
+        pass
+    return out
+
+
+def _http_status(response: Any) -> Optional[int]:
+    """Best-effort int HTTP status from a Playwright response (None on
+    anything unparseable — mocked responses in tests carry Mock status)."""
+    try:
+        if response is None:
+            return None
+        return int(response.status)
+    except Exception:
+        return None
+
+
 # ── Tool schemas ──────────────────────────────────────
 
 
@@ -390,7 +535,10 @@ def browse_to_schema() -> dict:
         "name": "browse_to",
         "description": (
             "Navigate to a URL and optionally extract content. "
-            "Returns the DOM as SDOM (structured DOM) for further processing."
+            "Returns the DOM as SDOM (structured DOM) for further processing. "
+            "Session cookies persist across calls (persistent context). "
+            "On HTTP >= 400 or navigation failure the result carries "
+            "forensics: block_vendor, screenshot_path, dom_snapshot."
         ),
         "inputSchema": {
             "type": "object",
@@ -417,7 +565,10 @@ def interact_schema() -> dict:
         "name": "interact",
         "description": (
             "Perform an interaction with a web element (click, type, scroll_into_view, "
-            "select, check, uncheck, hover, press)."
+            "select, check, uncheck, hover, press). "
+            "Session cookies persist across calls (persistent context). "
+            "On failure the result carries forensics: block_vendor, "
+            "screenshot_path, dom_snapshot."
         ),
         "inputSchema": {
             "type": "object",
@@ -677,7 +828,7 @@ class SpatialToolHandlers:
             # Extract content as SDOM, then serialize to a JSON-safe dict
             sdom = self.serializer.to_sdom(await page.content(), url, status)
 
-            return {
+            result = {
                 "url": url,
                 "extracted": True,
                 "sdom": sdom.model_dump(),
@@ -688,9 +839,34 @@ class SpatialToolHandlers:
                 # solve) — the agent sees it without a second call.
                 "captcha": await self._detect_captcha(page),
             }
+            # MP-6 (part B): a WAF refusal served as a normal HTTP error
+            # response (the Empower CloudFront 403) is NOT "site down" —
+            # flag the vendor + forensics on the result so the agent can
+            # tell "the site is refusing us" from a broken tool.
+            http_status = _http_status(response)
+            if (http_status or 0) >= 400:
+                result["refused"] = True
+                result["http_status"] = http_status
+                try:
+                    result.update(await _failure_forensics(page, response))
+                except Exception:
+                    pass
+            return result
         except Exception as e:
             logger.error("browse_to failed", extra={"url": url, "error": str(e)})
-            return {"error": f"Failed to browse to {url}: {str(e)}"}
+            result = {"error": f"Failed to browse to {url}: {str(e)}"}
+            # MP-6: forensics on the failure path — best-effort, and a
+            # forensics failure must never mask the original error.
+            try:
+                page
+            except NameError:
+                page = None
+            if page is not None:
+                try:
+                    result.update(await _failure_forensics(page))
+                except Exception:
+                    pass
+            return result
 
     # ── interact ───────────────────────────────────────
 
@@ -742,7 +918,19 @@ class SpatialToolHandlers:
             }
         except Exception as e:
             logger.error("interact failed", extra={"element_id": element_id, "action": action, "error": str(e)})
-            return {"error": f"Failed to interact with {element_id} using {action}: {str(e)}"}
+            result = {"error": f"Failed to interact with {element_id} using {action}: {str(e)}"}
+            # MP-6: cheap forensics on the interact failure path too —
+            # same evidence (vendor/screenshot/DOM), same best-effort rule.
+            try:
+                page
+            except NameError:
+                page = None
+            if page is not None:
+                try:
+                    result.update(await _failure_forensics(page))
+                except Exception:
+                    pass
+            return result
 
     # ── extract_page_state ─────────────────────────────
 
