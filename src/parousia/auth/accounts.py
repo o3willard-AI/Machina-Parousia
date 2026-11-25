@@ -163,6 +163,87 @@ class AccountStore:
         account = self.get_account(account_id)
         return account, api_key
 
+    def ensure_account(
+        self,
+        account_id: str,
+        rate_limit_per_hour: Optional[int] = None,
+        display_name: str = "",
+        tier: str = "free",
+        status: str = "active",
+    ) -> tuple[str, bool]:
+        """Idempotently ensure an account exists (MP-7 legacy migration).
+
+        Two modes, one method:
+
+        - **Row absent** → create it. For legacy config-only agents there is
+          NO API key: the row is created with ``api_key_hash = ''`` (they
+          authenticate via ingest/stdio, not the API-key path — no key is
+          generated or hashed here). All other fields take the passed
+          values.
+        - **Row present** → update ``rate_limit_per_hour`` / ``status`` (and
+          ``display_name`` only when a non-empty one is passed), and NEVER
+          touch ``api_key_hash`` / ``tier`` / ``email`` — those were set by
+          onboarding and a re-run of the migration must not clobber them.
+
+        Returns ``(account_id, created)`` so callers can report
+        created vs already-present.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        existing = self.get_account(account_id)
+        if existing is None:
+            self._conn.execute(
+                """INSERT INTO accounts (account_id, display_name, api_key_hash,
+                   tier, status, email, created_at, rate_limit_per_hour,
+                   sponsor_id, sponsor_contact)
+                   VALUES (?, ?, ?, ?, ?, '', ?, ?, '', '')""",
+                (
+                    account_id,
+                    display_name,
+                    "",  # legacy config-only agent: no API key
+                    tier,
+                    status,
+                    now,
+                    rate_limit_per_hour if rate_limit_per_hour is not None else 20,
+                ),
+            )
+            self._conn.commit()
+            return account_id, True
+
+        self._conn.execute(
+            """UPDATE accounts SET
+               rate_limit_per_hour = COALESCE(?, rate_limit_per_hour),
+               status = ?,
+               display_name = CASE WHEN ? != '' THEN ? ELSE display_name END
+               WHERE account_id = ?""",
+            (
+                rate_limit_per_hour,
+                status,
+                display_name,
+                display_name,
+                account_id,
+            ),
+        )
+        # api_key_hash / tier / email deliberately NOT in the UPDATE: the
+        # existing row was onboarding's truth; a migration re-run must not
+        # clobber it.
+        self._conn.commit()
+        return account_id, False
+
+    def list_account_ids(self, active_only: bool = True) -> list[str]:
+        """List account ids (active only by default) — MP-7: the single
+        registry replaces the legacy YAML agents block for "which agents
+        exist" queries (dashboard rate counters, available_agents)."""
+        if active_only:
+            rows = self._conn.execute(
+                "SELECT account_id FROM accounts WHERE status = 'active' "
+                "ORDER BY account_id"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT account_id FROM accounts ORDER BY account_id"
+            ).fetchall()
+        return [row["account_id"] for row in rows]
+
     def get_account(self, account_id: str) -> Optional[Account]:
         row = self._conn.execute(
             "SELECT * FROM accounts WHERE account_id = ?", (account_id,)
@@ -190,6 +271,12 @@ class AccountStore:
     def authenticate(self, api_key: str) -> Optional[Account]:
         """Look up an account by API key. Returns Account or None.
 
+        MP-7: rows with an EMPTY api_key_hash are skipped — legacy
+        config-only agents (migrated by `migrate-agents`) have no key and
+        authenticate via ingest/stdio, never the API path; an empty hash
+        would otherwise crash bcrypt ("Invalid salt") and turn a bad
+        token into a 500.
+
         Does NOT enforce status — callers should check account.status
         if they need to reject suspended/disabled accounts.
         """
@@ -197,7 +284,11 @@ class AccountStore:
             "SELECT account_id, api_key_hash FROM accounts"
         ).fetchall()
         for row in rows:
-            if self.verify_key(api_key, row["api_key_hash"]):
+            key_hash = row["api_key_hash"]
+            if not key_hash:
+                # Legacy migrated agent: no API key, nothing to verify.
+                continue
+            if self.verify_key(api_key, key_hash):
                 return self.get_account(row["account_id"])
         return None
 

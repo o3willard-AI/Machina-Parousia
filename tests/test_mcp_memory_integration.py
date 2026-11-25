@@ -129,13 +129,12 @@ class TestMCPRecorderWiring:
     def wired(self, tmp_path, monkeypatch):
         import mcp.types as types
         import parousia.guard.mcp_server as mcp_mod
-        from parousia.config import AgentConfig, ParousiaConfig
+        from parousia.config import ParousiaConfig
         from parousia.inbox.inbox_store import InboxStore
         from parousia.spatial.tools import SpatialToolHandlers
 
         config = ParousiaConfig(
             domain="agents.test.com",
-            agents={"hermes": AgentConfig()},
         )
         monkeypatch.setattr(mcp_mod, "load_config", lambda: config)
 
@@ -209,7 +208,7 @@ class TestMCPRecorderWiring:
         assert tool == "send_email"
         assert a == args
         assert parsed == {"sent": True, "message_id": "m-wire-1"}
-        assert agent == "hermes"  # config fallback agent
+        assert agent == "default"  # MP-7 stdio/no-auth sentinel (no registry fallback)
 
     @pytest.mark.asyncio
     async def test_check_inbox_wiring(self, wired):

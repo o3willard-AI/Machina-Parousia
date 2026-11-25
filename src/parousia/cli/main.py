@@ -55,7 +55,9 @@ def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_r
         config_data = {
             "domain": defaults.domain,
             "hostname": defaults.hostname,
-            "agents": {},
+            # MP-7: no "agents" block — accounts.db (AccountStore) is the
+            # single agent registry; `parousia-guard migrate-agents` moves
+            # any legacy block into it.
             "redis": {"host": "localhost", "port": 6379, "db": 0},
             "rate_limits": {"per_agent_per_hour": 100, "domain_per_day": 500},
             "postfix": {"aliases_file": "/etc/aliases", "guard_script": "/usr/local/bin/parousia-guard"},
@@ -328,6 +330,71 @@ def ingest():
     from parousia.guard.ingest import main as ingest_main
 
     ingest_main()
+
+
+@cli.command(name="migrate-agents")
+@click.option("--db", default=None, help="AccountStore DB path (default: config account_store.db_path).")
+@click.option("--config", "config_path", default=None,
+              help="Legacy config YAML path (default: /etc/parousia/config.yaml then ~/.parousia/config.yaml).")
+def migrate_agents(db, config_path):
+    """MP-7: migrate the legacy `agents:` block into accounts.db.
+
+    Idempotent: config-only agents are created with NO API key
+    (api_key_hash='') — they authenticate via ingest/stdio, not the API
+    (no key is generated or hashed). Existing rows get their
+    rate limit / status refreshed; key / tier / email are never touched.
+    Safe to run repeatedly. After it succeeds the `agents:` block can be
+    deleted from the config file.
+    """
+    from pathlib import Path
+
+    import yaml as _yaml
+
+    from parousia.auth.accounts import AccountStore
+    from parousia.config import _find_config, load_config
+
+    cfg = load_config(config_path)
+    db_path = db or cfg.account_store.db_path
+
+    # Resolve the raw file: the pydantic model drops the legacy block (MP-7),
+    # so read it straight from the YAML text.
+    path = Path(config_path) if config_path else _find_config()
+    legacy: dict = {}
+    if path is not None and Path(path).exists():
+        with open(path) as f:
+            raw = _yaml.safe_load(f) or {}
+        legacy = raw.get("agents") or {}
+
+    store = AccountStore(db_path)
+    store.connect()
+    try:
+        if not legacy:
+            count = len(store.list_account_ids(active_only=False))
+            click.echo("No legacy `agents:` block found — nothing to migrate.")
+            click.echo(f"accounts.db ({db_path}) holds {count} account(s).")
+            return
+
+        created: list[str] = []
+        present: list[str] = []
+        for agent_id, spec in legacy.items():
+            rate = None
+            if isinstance(spec, dict):
+                rate = spec.get("rate_limit_per_hour")
+            _, was_created = store.ensure_account(
+                agent_id, rate_limit_per_hour=rate
+            )
+            (created if was_created else present).append(agent_id)
+
+        for agent_id in created:
+            click.secho(f"✓ created  {agent_id} (no API key)", fg="green")
+        for agent_id in present:
+            click.echo(f"• present  {agent_id} (rate limit / status refreshed)")
+        click.echo(
+            f"migrated {len(created)} agent(s), {len(present)} already present."
+        )
+        click.echo("The `agents:` block can now be deleted from the config file.")
+    finally:
+        store.close()
 
 
 @cli.command()

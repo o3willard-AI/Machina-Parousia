@@ -100,23 +100,21 @@ async def ingest(request: IngestRequest):
     """
     config = load_config()
 
-    # Resolve agent identity across both registries.
-    # config.agents — legacy static dict in config.yaml.
-    # _account_store — modern SQLite AccountStore (source of truth for
-    # onboarded agents). An agent is valid if known to EITHER registry.
+    # Resolve agent identity against the SINGLE registry (MP-7):
+    # _account_store — SQLite AccountStore. The legacy YAML agents block
+    # is gone; an agent not known to AccountStore is unknown, full stop.
     agent_account = _account_store.get_account(request.agent_id)
 
-    if agent_account is not None:
-        # Known to AccountStore — enforce status.
-        if agent_account.status != "active":
-            raise HTTPException(
-                status_code=403,
-                detail=f"Account '{request.agent_id}' is {agent_account.status}",
-            )
-    elif request.agent_id not in config.agents:
-        # Not in AccountStore and not in legacy config → unknown.
+    if agent_account is None:
+        # Not in AccountStore → unknown agent (the existing 404).
         raise HTTPException(
             status_code=404, detail=f"Unknown agent: {request.agent_id}"
+        )
+    if agent_account.status != "active":
+        # Known to AccountStore — enforce status.
+        raise HTTPException(
+            status_code=403,
+            detail=f"Account '{request.agent_id}' is {agent_account.status}",
         )
 
     task_id = str(uuid.uuid4())[:12]
@@ -231,7 +229,8 @@ async def metrics():
         host=config.redis.host, port=config.redis.port,
         db=config.redis.db, socket_connect_timeout=2,
     )
-    return JSONResponse(collect_metrics(config, r))
+    # MP-7: the per-agent rate counters iterate the AccountStore registry.
+    return JSONResponse(collect_metrics(config, r, account_store=_account_store))
 
 
 @app.get("/dashboard")

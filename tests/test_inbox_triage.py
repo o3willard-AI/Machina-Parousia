@@ -32,7 +32,7 @@ from mcp.types import CallToolRequest, CallToolRequestParams
 
 from parousia.auth.accounts import AccountStore
 from parousia.auth.mcp_auth import _auth_context, set_auth_context
-from parousia.config import AgentConfig, ParousiaConfig
+from parousia.config import ParousiaConfig
 from parousia.guard import mcp_server
 from parousia.guard.mcp_server import _build_server
 from parousia.inbox.inbox_store import InboxMessage, InboxStore
@@ -92,10 +92,9 @@ def server_and_inbox(monkeypatch):
     inbox.store_message(_msg("hermes", "msg-hermes-1"))
     inbox.store_message(_msg("ricky", "msg-ricky-1"))
 
-    config = ParousiaConfig(
-        domain="agents.test.com",
-        agents={"hermes": AgentConfig(), "ricky": AgentConfig()},
-    )
+    # MP-7: no legacy agents dict — the harness accounts live in the
+    # AccountStore (ricky_account fixture); config carries no registry.
+    config = ParousiaConfig(domain="agents.test.com")
 
     import fakeredis
 
