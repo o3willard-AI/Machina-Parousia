@@ -31,7 +31,7 @@ How Parousia's components fit together and what happens when things happen.
                    │  ├──────────────┤
                    │  │  MCP Server  │  Stdio (spawned per-agent)
                    │  │  (stdio/SSE) │  SSE (:8081) for remote agents
-                   │  │              │  11 tools (email ×2, temp ×6, spatial ×3)
+                   │  │              │  18 tools (email ×7, temp ×6, spatial ×5)
                    │  ├──────────────┤
                    │  │  Auth        │  bcrypt API key validation
                    │  │  Middleware  │  AccountStore → tier/permissions
@@ -127,7 +127,7 @@ Every MCP and REST request (except `/health` and `/onboarding`) goes through:
 4. Inject into request context
 5. All downstream operations scope by `account_id`
 
-Config-based agents (`config.yaml` → `agents:`) are a fallback when no auth header is present. This preserves backward compatibility for local dev.
+`accounts.db` (the AccountStore) is the **single source of truth** for agent identities — the legacy `config.yaml` `agents:` block has been removed. Agents that predate onboarding (e.g. migrated config-only agents) hold accounts with an empty `api_key_hash` and authenticate via ingest/stdio, never the API-key path.
 
 ### Memory Engine ↔ MCP Server
 
@@ -284,9 +284,9 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
      → Writes to SQLite history DB
 
 7. Fact is now searchable
-   → Agent: mem0_search("deployment events")
+   → No memory MCP tool — agents query Qdrant directly by user_id filter
    → Qdrant vector search returns fact with score
-   → Cross-agent: other agents query Qdrant by user_id filter
+   → Cross-agent: query Qdrant with a `user_id` prefix filter (e.g. `parousia-`)
 ```
 
 ### Circuit breaker lifecycle
@@ -330,9 +330,7 @@ server:
   mcp_host: "0.0.0.0"
   mcp_port: 8081          # for reference only — MCP uses stdio transport
 
-agents:
-  hermes:
-    rate_limit_per_hour: 100
+# Agents are onboarded into accounts.db (no `agents:` block) — see ONBOARDING.md
 
 redis:
   host: localhost

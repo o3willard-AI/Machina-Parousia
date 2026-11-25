@@ -116,6 +116,85 @@ Messages are marked read when returned. To re-read old messages, set `unread_onl
 
 ---
 
+### `read_message`
+
+Read a single message by its ID and mark it read.
+
+**Parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `message_id` | ✅ | Message ID from `check_inbox` |
+
+**Request:**
+```json
+{
+  "tool": "read_message",
+  "arguments": { "message_id": "msg_abc123" }
+}
+```
+
+**Response:** the full message (id, sender, recipient, subject, body, received_at, read).
+
+---
+
+### `wait_for_email`
+
+Poll your inbox until a message arrives whose **subject OR sender** matches a case-insensitive substring, within a timeout. Returns the message plus its **body links** (extracted from text and HTML) so you can `browse_to` a confirmation URL directly — the double-opt-in pattern.
+
+**Parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `pattern` | ✅ | Case-insensitive substring matched against subject OR sender |
+| `timeout_ms` | ❌ | Overall wait bound (default 30000, max 120000) |
+
+**Request:**
+```json
+{
+  "tool": "wait_for_email",
+  "arguments": { "pattern": "confirm your subscription", "timeout_ms": 45000 }
+}
+```
+
+**Response on match:**
+```json
+{
+  "found": true,
+  "message": { "id": "msg_abc123", "sender": "newsletter@example.com", "subject": "Confirm your subscription", "body_text": "...", "received_at": "..." },
+  "links": ["https://example.com/confirm?token=..."]
+}
+```
+
+**Response on timeout:**
+```json
+{ "found": false }
+```
+
+Account-scoped: only your own inbox is polled.
+
+---
+
+### Inbox triage — `mark_read`, `archive`, `delete`
+
+Triage your own messages by ID. Each is **account-scoped**: the message must be stored for the authenticated agent — another agent's message ID is refused with `"not your message"` (indistinguishable from absent), and a nonexistent ID returns `"message not found"`.
+
+| Tool | Returns | Notes |
+|------|---------|-------|
+| `mark_read` | `{"marked": true}` | Marks the message read |
+| `archive` | `{"archived": true}` | Marks the message archived |
+| `delete` | `{"deleted": true}` | Permanently removes the message |
+
+**Request:**
+```json
+{
+  "tool": "delete",
+  "arguments": { "message_id": "msg_abc123" }
+}
+```
+
+---
+
 ## How inbound mail flows
 
 ```
@@ -199,9 +278,9 @@ All MCP tools require an API key. Include it in every request header:
 Authorization: Bearer psk_your_api_key_here
 ```
 
-Keys are created at onboarding (POST `/onboarding`), bcrypt-hashed at rest, and shown exactly once. Rotate via `POST /account/rotate-key`.
+Keys are created at onboarding (POST `/onboard`), bcrypt-hashed at rest in `accounts.db`, and shown exactly once. Rotate via `POST /account/rotate-key`.
 
-Config-based agents (`config.yaml` → `agents:`) are a fallback for local dev when no auth header is present.
+`accounts.db` is the **single source of truth** for agent identities. There is no longer a `config.yaml` `agents:` fallback — every agent must be onboarded into the account store.
 
 ---
 

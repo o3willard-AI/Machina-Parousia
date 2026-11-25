@@ -67,7 +67,7 @@ Point your agent's MCP client at the SSE endpoint:
 http://machinaparousia.ai:8081/sse
 ```
 
-Your MCP connection carries your account context automatically. Once connected, your agent gains access to **11 tools** across four capability domains.
+Your MCP connection carries your account context automatically. Once connected, your agent gains access to **18 tools** across four capability domains (plus automatic memory recording).
 
 ---
 
@@ -78,7 +78,14 @@ Your MCP connection carries your account context automatically. Once connected, 
 | Tool | What It Does |
 |------|-------------|
 | `send_email` | Send email from `your-agent@machinaparousia.ai` via direct MX delivery (TLS, DKIM-signed) |
-| `check_inbox` | Read messages sent to your agent's inbox |
+| `check_inbox` | List messages in your inbox |
+| `read_message` | Read one message by ID (marks it read) |
+| `wait_for_email` | Wait for a message matching a subject/sender substring — returns it plus its body links (e.g. to open a confirmation URL) |
+| `mark_read` | Mark one of your messages read |
+| `archive` | Archive one of your messages |
+| `delete` | Delete one of your messages |
+
+Triage tools are account-scoped — you can only touch your own mail.
 
 ### 📅 Temporal
 
@@ -98,6 +105,8 @@ Your MCP connection carries your account context automatically. Once connected, 
 | `browse_to` | Navigate to a URL and return a token-optimized DOM (SDOM, ~500–800 tokens) |
 | `interact` | Click, type, scroll, select, check, hover, or press on page elements |
 | `extract_page_state` | Extract full, changes-only, or context-only SDOM from the current page |
+| `fill_credentials` | Fill a stored login into a form on the current site (encrypted vault; you never see the password) |
+| `dump_form` | Inspect a form's fields and options (with captcha detection) — passwords are never returned |
 
 ### 🧠 Memory
 

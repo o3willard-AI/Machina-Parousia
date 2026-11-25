@@ -197,6 +197,61 @@ Extract the current page as SDOM without re-navigating. Use this after interacti
 
 ---
 
+### `fill_credentials`
+
+Fill a stored credential into a login form on the **current page's origin**. Credentials are held in an encrypted-at-rest vault (Fernet, populated by the human via `parousia-guard vault add`). The fill is **origin-bound** (only the exact site the credential was saved for) and the agent **never sees the secret** — the tool returns a fill summary only.
+
+**Parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `handle` | ✅ | The credential handle (as stored by the human) |
+
+**Response:**
+```json
+{ "filled": true, "fields": ["username", "password"] }
+```
+
+If no credential is stored for the current origin, the tool answers `"no credential stored"` — it never fabricates or falls back to anything less structured.
+
+---
+
+### `dump_form`
+
+Introspect the current page's form controls so an agent knows exactly what to fill before it does. Returns per-field `name` / `type` / `label` / current value / options (select) / radio-group options — with **password values always nulled** (both in the extraction JS and re-masked on the Python side). Includes **captcha detection** (`{present, vendor, type, sitekey}` for reCAPTCHA v2/v3, hCaptcha, Turnstile).
+
+**Response:**
+```json
+{
+  "form": {
+    "fields": [
+      {"name": "email", "type": "email", "label": "Email", "current_value": ""},
+      {"name": "password", "type": "password", "label": "Password", "is_secret": true, "current_value": null}
+    ],
+    "submit": {"type": "button", "label": "Sign in"}
+  },
+  "captcha": {"present": true, "vendor": "cloudflare", "type": "turnstile", "sitekey": "0x4AAA..."}
+}
+```
+
+---
+
+## Failure forensics
+
+When `browse_to` / `interact` fail (HTTP ≥ 400 or an exception), the result carries **forensics** so an agent can tell "the tool is broken" from "the site is refusing us":
+
+| Field | Description |
+|-------|-------------|
+| `refused` | `true` when the HTTP response was ≥ 400 |
+| `http_status` | The HTTP status code |
+| `block_vendor` | `cloudfront` / `cloudflare` / `akamai` / `none` — classified from headers first (e.g. CloudFront's `x-cache: Error from cloudfront`, Cloudflare's `cf-ray`) then body phrases |
+| `screenshot_path` | Path to a `.png` screenshot of the failure |
+| `dom_snapshot` | First ~2 KB of body text |
+
+Every forensics leg is best-effort — a forensics failure never masks the original tool error.
+
+---
+
 ## Browser pool
 
 The browser pool manages per-agent Chromium instances:

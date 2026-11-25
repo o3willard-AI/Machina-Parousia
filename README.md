@@ -1,6 +1,6 @@
 # Machina Parousia
 
-**"The Machine's Presence"** — A sovereign home-base that gives AI agents persistent presence in the world: email identity, temporal awareness, and spatial browsing.
+**"The Machine's Presence"** — A sovereign home-base that gives AI agents persistent presence in the world: email identity, temporal awareness, spatial browsing, and semantic memory.
 
 ### The problem
 
@@ -8,17 +8,18 @@ Agents are stateless. They have no email address, no calendar, no ability to bro
 
 ### What Parousia gives agents
 
-Parousia is a single self-hosted server that gives every agent under your domain three co-equal capabilities — all through stdio MCP transport (spawned per-agent as a subprocess):
+Parousia is a single self-hosted server that gives every agent under your domain four co-equal capabilities — all through stdio MCP transport (spawned per-agent as a subprocess):
 
 | Capability | What it provides |
 |-----------|-----------------|
-| **📧 Email** | Every agent gets `agent@yourdomain.com`. Send and receive mail through MCP tools. Push-based ingest — no polling, no IMAP, no mailboxes. |
+| **📧 Email** | Every agent gets `agent@yourdomain.com`. Send, read, triage, and wait for mail through MCP tools. Push-based ingest — no polling, no IMAP, no mailboxes. |
 | **🕐 Temporal** | Agents maintain a calendar, schedule events, set timers, and keep a research journal. Token-lean DSL output so calendar context costs minimal tokens. Auto-resolves scheduling conflicts. Exports to iCal/Google/MS Graph. |
-| **🌐 Spatial** | Agents browse the web through persistent per-agent Chromium profiles. Returns SDOM (Structured DOM) — compressed, element-ID-addressable, interaction-ready. Click, type, scroll, select, hover — 8 action types. |
+| **🌐 Spatial** | Agents browse the web through persistent per-agent Chromium profiles. Returns SDOM (Structured DOM) — compressed, element-ID-addressable, interaction-ready. Click, type, scroll, select, hover — 8 action types. Includes secure credential fills and form introspection. |
+| **🧠 Memory** | Automatic, cross-domain semantic memory: every recorded tool call is stored as a natural-language fact in a local Qdrant vector DB. Searchable per-agent; no external API calls. |
 
-All three share the same MCP server, the same config file, and the same deployment. Each is an independent capability — you can use email without spatial, temporal without email — but they're designed to interoperate (email triggers calendar events, browse sessions feed into journal entries).
+All four share the same MCP server, the same config file, and the same deployment. Each is an independent capability — you can use email without spatial, temporal without email — but they're designed to interoperate (email triggers calendar events, browse sessions feed into memory).
 
-> **Version:** v0.2.0 · **Tests:** 320 passing · **License:** MIT
+> **Version:** v0.2.0 · **Tests:** 596 passing · **License:** MIT
 
 Every agent account is bound at onboarding to a named human sponsor, so Parousia records a declared **Registered Accountable Entity (RAE) at L0 (declared, unverified)** with actions attributable to that human rather than only to the agent — see the [RAE specification](https://github.com/o3willard-AI/RAE) and [docs/accountability.md](docs/accountability.md).
 
@@ -34,6 +35,7 @@ Parousia runs on **any Linux host with a publicly routable IP address**. You con
 | **Python** | ≥ 3.10 |
 | **Postfix** | SMTP server for inbound + outbound mail |
 | **Redis** | ≥ 5.0 — rate limit counters |
+| **Qdrant** | Vector DB for the memory layer |
 | **Chromium** | For spatial browsing. Playwright can self-install it. |
 | **Public IP** | Static, routable. Required for MX records and reverse DNS. |
 | **Inbound ports** | 25 (SMTP), 80/443 (TLS), 8080 (REST), 8081 (MCP) |
@@ -47,14 +49,21 @@ Full provisioning walkthrough: **[docs/getting-started.md](docs/getting-started.
 
 ## MCP Tools
 
-Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All 11 tools are available through a single MCP session:
+Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **18 tools** are available through a single MCP session, plus the automatic memory layer (no tools — recording happens in the background).
 
 ### 📧 Email
 
 | Tool | Description |
 |------|-------------|
 | `send_email` | Send email through Parousia. Rate-limited: 100/hr per agent, 500/day domain-wide. |
-| `check_inbox` | Read agent inbox. Returns sender, subject, body, received time. Supports `unread_only` and `limit`. |
+| `check_inbox` | List your inbox. Returns sender, subject, body, received time. Supports `unread_only` and `limit`. |
+| `read_message` | Read one message by ID (marks it read). |
+| `wait_for_email` | Poll your inbox for a message matching a subject/sender substring (within a timeout). Returns the message plus its body links — e.g. to `browse_to` a confirmation URL (double opt-in). |
+| `mark_read` | Mark one of your messages read by ID. |
+| `archive` | Archive one of your messages by ID. |
+| `delete` | Delete one of your messages by ID. |
+
+Triage tools are **account-scoped**: they only ever touch messages stored for the authenticated agent — another agent's message ID is refused.
 
 ### 🕐 Temporal
 
@@ -74,10 +83,18 @@ Agents connect to Parousia via MCP stdio transport — each agent spawns `parous
 | `browse_to` | Navigate to a URL and return SDOM. 3 extraction modes: `standard`, `content_only`, `interactive_only`. |
 | `interact` | Perform actions on SDOM elements by ID. 8 actions: `click`, `type`, `scroll_into_view`, `select`, `check`, `uncheck`, `hover`, `press`. |
 | `extract_page_state` | Extract current page as SDOM. 3 modes: `full`, `changes`, `context_only`. |
+| `fill_credentials` | Fill a stored credential into a login form on the current origin (encrypted-at-rest vault; origin-bound; the agent never sees the secret). |
+| `dump_form` | Introspect a form's controls — per-field type/label/options, with captcha detection. Password values are never returned. |
+
+Session cookies persist across calls (persistent per-agent Chromium profile). On a failed/refused `browse_to`/`interact`, the result carries **failure forensics** — a `block_vendor` classification (CloudFront/Cloudflare/Akamai), a screenshot path, and a DOM snapshot — so agents can tell "the tool is broken" from "the site is refusing us".
+
+### 🧠 Memory (automatic)
+
+Every recorded tool call is written in the background as a natural-language fact to a local Qdrant vector DB (fastembed, CPU-only — no external API). Facts are **agent-scoped**: `parousia-{agent_id}`. There are no memory MCP tools — query your own facts or cross-agent facts via direct Qdrant (see [docs/capabilities/memory.md](docs/capabilities/memory.md)). Credential fills are never recorded.
 
 ### Authentication
 
-Parousia uses API-key authentication (bcrypt-hashed at rest). Include an `Authorization: Bearer <api_key>` header with every MCP request. Keys are issued at onboarding — see [docs/capabilities/email.md](docs/capabilities/email.md).
+Parousia uses API-key authentication (bcrypt-hashed at rest in `accounts.db`). Include an `Authorization: Bearer <api_key>` header with every MCP request. Keys are issued at onboarding — see [ONBOARDING.md](ONBOARDING.md). `accounts.db` is the **single source of truth** for agent identities (the legacy `config.yaml` `agents:` block has been removed).
 
 ---
 
@@ -93,7 +110,7 @@ pip install -e .
 
 # Generate a default config
 parousia-guard setup --config
-# Edit /etc/parousia/config.yaml with your domain and agents
+# Edit /etc/parousia/config.yaml with your domain
 
 # Run the REST + MCP servers (no Postfix needed for dev)
 parousia-guard serve
@@ -124,16 +141,21 @@ For a full production deployment with working email, see **[docs/getting-started
                    │  │  Engine      │  DSL serializer, conflict resolver
                    │  ├──────────────┤
                    │  │  Spatial     │  Per-agent Chromium x N
-                   │  │  Engine      │  SDOM serializer, browser pool
+                   │  │  Engine      │  SDOM serializer, browser pool,
+                   │  │              │  credential store (encrypted)
                    │  ├──────────────┤
                    │  │  Inbox       │  Per-agent SQLite inboxes
                    │  │  Store       │  Push-based, no polling
                    │  ├──────────────┤
-                   │  │  Account     │  SQLite, bcrypt-hashed API keys
-                   │  │  Store       │  Free/paid tiers, admin endpoints
+                   │  │  Memory      │  Mem0 recorder → Qdrant :6333
+                   │  │  Engine      │  fire-and-forget, circuit breaker
+                   │  ├──────────────┤
+                   │  │  Account     │  SQLite (accounts.db), bcrypt keys
+                   │  │  Store       │  Single agent registry
                    │  └──────────────┤
                    │                 │
                    │  Redis :6379    │  Rate-limit token buckets
+                   │  Qdrant :6333   │  Vector memory
                    └─────────────────┘
 ```
 
@@ -145,10 +167,12 @@ Full component interactions and request lifecycle: **[docs/architecture.md](docs
 
 | Doc | What it covers |
 |-----|---------------|
-| [Getting Started](docs/getting-started.md) | Full provisioning: host setup, DNS, Postfix, Redis, TLS, DKIM, verification |
-| [Email Guide](docs/capabilities/email.md) | `send_email` + `check_inbox` with request/response examples |
+| [Getting Started](docs/getting-started.md) | Full provisioning: host setup, DNS, Postfix, Redis, Qdrant, TLS, DKIM, verification |
+| [Onboarding](ONBOARDING.md) | How an agent (or its sponsor) creates an account and connects via MCP |
+| [Email Guide](docs/capabilities/email.md) | All 7 email tools with request/response examples |
 | [Temporal Guide](docs/capabilities/temporal.md) | All 6 temporal tools, DSL format reference, conflict resolution rules |
-| [Spatial Guide](docs/capabilities/spatial.md) | All 3 spatial tools, SDOM format reference, browser pool internals |
+| [Spatial Guide](docs/capabilities/spatial.md) | All 5 spatial tools, SDOM format reference, credential store, browser pool internals |
+| [Memory Guide](docs/capabilities/memory.md) | The automatic memory layer, fact formatters, circuit breaker, querying |
 | [Architecture](docs/architecture.md) | Full system diagram, component contracts, life-of-an-email, life-of-an-MCP-call |
 | [Accountability (RAE)](docs/accountability.md) | The human sponsor behind every agent action; L0 (declared) assurance model and claim boundary |
 | [Hosting Notes](docs/hosting.md) | Provider-specific notes: AWS (SES, port 25), Hetzner, DigitalOcean, Linode |

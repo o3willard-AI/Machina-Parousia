@@ -298,12 +298,7 @@ server:
   mcp_host: "0.0.0.0"
   mcp_port: 8081       # stdio transport only — no network port needed
 
-agents:
-  # Add your agents here. These are the local parts before @yourdomain.com
-  hermes:
-    rate_limit_per_hour: 100
-  mr-krabs:
-    rate_limit_per_hour: 100
+# Agents are onboarded into accounts.db (no `agents:` block) — see ONBOARDING.md
 
 spatial:
   enabled: true

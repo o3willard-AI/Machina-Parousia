@@ -1,6 +1,6 @@
 # Memory — Capability Guide
 
-Parousia's 4th presence domain. Every tool call — sending email, scheduling events, browsing web pages — is automatically recorded as a natural-language fact and stored in a vector database. Agents can search across their own history and discover facts from other agents, giving the Machine a persistent, searchable memory of everything it has done.
+Parousia's 4th presence domain. Write-side tool calls — sending email, scheduling events, browsing web pages — are automatically recorded as natural-language facts and stored in a vector database. Agents can search across their own history and discover facts from other agents, giving the Machine a persistent, searchable memory of everything it has done.
 
 All facts are stored in Qdrant on the Parousia host (port 6333). Embeddings use fastembed (BAAI/bge-small-en-v1.5, 384-dim) — no external API calls, no GPU required. Writes are fire-and-forget on a daemon thread and return in <1ms; they never block tool calls.
 
@@ -81,46 +81,9 @@ Every tool has a dedicated formatter that converts the tool call into a single n
 
 ---
 
-## Querying memory
+### Querying memory
 
-### Within an MCP session (agent's own facts)
-
-Agents connected via MCP can search their own memory:
-
-**Search by meaning:**
-```json
-{
-  "tool": "mem0_search",
-  "arguments": {
-    "query": "deployment events June 2026",
-    "top_k": 5
-  }
-}
-```
-```json
-{
-  "results": [
-    {
-      "memory": "Scheduled \"Deploy v0.3.0 to production\" for 2026-06-27T14:00:00Z (medium flexibility).",
-      "score": 0.89
-    },
-    {
-      "memory": "Sent email to team@example.com: \"v0.3.0 rollout plan\".",
-      "score": 0.76
-    }
-  ],
-  "count": 2
-}
-```
-
-**Full profile:**
-```json
-{
-  "tool": "mem0_profile",
-  "arguments": {}
-}
-```
-Returns all stored facts for the agent.
+There is **no memory MCP query tool** — memory recording is automatic and write-only. To read facts back, query Qdrant directly (below). This is a deliberate scope boundary: the recording path is fire-and-forget and must never block tool calls, and the read path is a direct Qdrant query rather than an MCP surface.
 
 ### Cross-agent search (direct Qdrant)
 
