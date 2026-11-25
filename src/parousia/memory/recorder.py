@@ -14,6 +14,13 @@ logger = logging.getLogger("parousia.memory")
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_SECS = 120
 
+# MP-3 (part B): credential fills are NEVER recorded — no fill events, no
+# field values, no secrets in any memory layer. The fill tool has no
+# formatter either (so it would be skipped as unknown), but this explicit
+# guard keeps it skipped even if a formatter is ever accidentally
+# registered for it.
+_NEVER_RECORD = frozenset({"fill_credentials"})
+
 # ── Fact formatters per tool ──────────────────────
 
 _FACT_FORMATTERS: Dict[str, callable] = {}
@@ -213,6 +220,9 @@ class MemoryRecorder:
         """
         if self._is_breaker_open():
             return
+
+        if tool_name in _NEVER_RECORD:
+            return  # MP-3: credential fills never reach any memory layer
 
         formatter = _FACT_FORMATTERS.get(tool_name)
         if formatter is None:

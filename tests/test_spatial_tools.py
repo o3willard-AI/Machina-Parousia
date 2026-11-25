@@ -59,11 +59,13 @@ class TestSpatialTools(unittest.TestCase):
 
     def test_all_spatial_schemas(self):
         """Test that ALL_SPATIAL_SCHEMAS contains correct schemas."""
-        self.assertEqual(len(ALL_SPATIAL_SCHEMAS), 3)
+        # MP-3: fill_credentials is the 4th spatial tool (was 3).
+        self.assertEqual(len(ALL_SPATIAL_SCHEMAS), 4)
         names = [schema["name"] for schema in ALL_SPATIAL_SCHEMAS]
         self.assertIn("browse_to", names)
         self.assertIn("interact", names)
         self.assertIn("extract_page_state", names)
+        self.assertIn("fill_credentials", names)
 
     # ── Handler tests ────────────────────────────────────────────────
     # Handlers store mocks directly (no .return_value indirection).
