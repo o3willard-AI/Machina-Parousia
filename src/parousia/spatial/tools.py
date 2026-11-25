@@ -68,6 +68,320 @@ def _effective_egress_ip() -> str:
         return "unknown"
 
 
+# ── MP-4: form introspection + captcha detection (issue #18) ──────
+
+
+# Pure-DOM extraction — NO mutation, no clicks. Runs in the page and returns
+# every form's controls with labels/flags/limits; secret values (password
+# inputs) are nulled IN THE PAGE so they never even cross the evaluate
+# return. The Python assembly (_assemble_form_report) re-masks (belt and
+# braces + unit-testable without a browser).
+DUMP_FORM_JS = """
+(() => {
+  const visible = (el) => {
+    if (!el) return false;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'hidden') return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (el.offsetParent === null && style.position !== 'fixed') return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const labelText = (el) => {
+    let text = '';
+    const id = el.id;
+    if (id) {
+      const lab = document.querySelector('label[for="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+      if (lab) text = (lab.textContent || '').trim();
+    }
+    if (!text) {
+      const wrap = el.closest('label');
+      if (wrap && wrap !== el) text = (wrap.textContent || '').trim();
+    }
+    if (!text) text = (el.getAttribute('aria-label') || '').trim();
+    if (!text) {
+      const labelledby = el.getAttribute('aria-labelledby');
+      if (labelledby) {
+        for (const ref of labelledby.split(/\\s+/)) {
+          const t = document.getElementById(ref);
+          if (t && (t.textContent || '').trim()) { text = (t.textContent || '').trim(); break; }
+        }
+      }
+    }
+    if (!text) {
+      const name = el.getAttribute('name');
+      if (name) {
+        const lab = document.querySelector('label[for="' + (window.CSS && CSS.escape ? CSS.escape(name) : name) + '"]');
+        if (lab) text = (lab.textContent || '').trim();
+      }
+    }
+    return text;
+  };
+  const limitsOf = (el) => {
+    const lim = {};
+    for (const a of ['maxlength', 'minlength', 'min', 'max', 'pattern']) {
+      const v = el.getAttribute(a);
+      if (v !== null && v !== '') lim[a] = v;
+    }
+    return lim;
+  };
+  const forms = [];
+  const allForms = Array.from(document.forms);
+  for (let fi = 0; fi < allForms.length; fi++) {
+    const form = allForms[fi];
+    const controls = [];
+    for (const el of Array.from(form.elements)) {
+      const tag = (el.tagName || '').toLowerCase();
+      const type = tag === 'input'
+        ? (el.getAttribute('type') || 'text').toLowerCase()
+        : tag;
+      const isSecret = type === 'password';
+      const rawValue = isSecret ? null : (el.value || '').trim();
+      const ctl = {
+        tag: tag,
+        type: type,
+        name: el.getAttribute('name') || '',
+        id: el.id || '',
+        label: labelText(el),
+        placeholder: (el.getAttribute('placeholder') || ''),
+        required: el.required === true || el.hasAttribute('required'),
+        disabled: el.disabled === true || el.hasAttribute('disabled'),
+        readonly: el.readOnly === true || el.hasAttribute('readonly'),
+        visible: visible(el),
+        is_secret: isSecret,
+        value: isSecret ? null : rawValue,
+        current_value: isSecret ? null : rawValue,
+        limits: limitsOf(el),
+      };
+      if (tag === 'select') {
+        ctl.multiple = el.multiple === true;
+        ctl.select_options = Array.from(el.options).map((o) => ({
+          value: o.value,
+          label: (o.textContent || '').trim(),
+          selected: o.selected,
+        }));
+      }
+      if (type === 'radio' || type === 'checkbox') {
+        ctl.checked = el.checked === true;
+        const gname = el.getAttribute('name') || '';
+        const group = [];
+        if (gname) {
+          const sibs = document.querySelectorAll(
+            'input[type="' + type + '"][name="' +
+            (window.CSS && CSS.escape ? CSS.escape(gname) : gname) + '"]'
+          );
+          for (const cand of Array.from(sibs)) {
+            group.push({
+              value: cand.value,
+              label: labelText(cand),
+              checked: cand.checked,
+            });
+          }
+        }
+        ctl.group_options = group;
+      }
+      controls.push(ctl);
+    }
+    forms.push({
+      index: fi,
+      id: form.id || '',
+      name: form.getAttribute('name') || '',
+      action: form.action || '',
+      method: (form.getAttribute('method') || 'get').toLowerCase(),
+      controls: controls,
+    });
+  }
+  return { form_count: forms.length, forms: forms };
+})()
+"""
+
+# Detect (never solve) captcha presence. Vendor-specific markers first,
+# then a generic captcha-named element fallback (vendor 'other').
+CAPTCHA_JS = """
+(() => {
+  const out = { present: false, vendor: 'none', type: null, sitekey: null };
+  const q = (sel) => document.querySelector(sel);
+  const iframeHas = (needle) => {
+    for (const f of document.querySelectorAll('iframe')) {
+      if ((f.src || '').indexOf(needle) !== -1) return true;
+    }
+    return false;
+  };
+  // reCAPTCHA v2 (widget element; data-size=invisible → the invisible badge)
+  const rec = q('.g-recaptcha');
+  if (rec) {
+    out.present = true;
+    out.vendor = 'recaptcha_v2';
+    const size = (rec.getAttribute('data-size') || '').toLowerCase();
+    out.type = size === 'invisible' ? 'invisible' : 'visible';
+    out.sitekey = rec.getAttribute('data-sitekey') || null;
+  }
+  // reCAPTCHA v3: script with a render= param, no widget element
+  if (!out.present) {
+    let v3 = false;
+    for (const s of document.querySelectorAll('script[src]')) {
+      const src = s.src || '';
+      if (src.indexOf('recaptcha/api.js') !== -1 && src.indexOf('render=') !== -1) v3 = true;
+    }
+    if (v3) {
+      out.present = true;
+      out.vendor = 'recaptcha_v3';
+      out.type = 'invisible';
+      const m = (document.querySelector('script[src*="render="]') || {src: ''}).src.match(/render=([^&]+)/);
+      out.sitekey = m ? decodeURIComponent(m[1]) : null;
+    }
+  }
+  if (!out.present && iframeHas('google.com/recaptcha')) {
+    out.present = true;
+    out.vendor = 'recaptcha_v2';
+    out.type = 'visible';
+  }
+  // hCaptcha
+  if (!out.present) {
+    const hc = q('.h-captcha, iframe[src*="hcaptcha.com"]');
+    if (hc || typeof window.hcaptcha !== 'undefined') {
+      out.present = true;
+      out.vendor = 'hcaptcha';
+      const invis = q('.h-captcha[data-size="invisible"], [data-hcaptcha-size="invisible"]');
+      out.type = invis ? 'invisible' : 'visible';
+      const el = q('.h-captcha');
+      out.sitekey = el ? (el.getAttribute('data-sitekey') || null) : null;
+    }
+  }
+  // Cloudflare Turnstile
+  if (!out.present) {
+    const ts = q('.cf-turnstile, iframe[src*="challenges.cloudflare.com"]');
+    if (ts || typeof window.turnstile !== 'undefined') {
+      out.present = true;
+      out.vendor = 'turnstile';
+      out.type = 'visible';
+      const el = q('.cf-turnstile');
+      out.sitekey = el ? (el.getAttribute('data-sitekey') || null) : null;
+    }
+  }
+  // Generic fallback: anything captcha-named (vendor unknown)
+  if (!out.present) {
+    const generic = q('[class*="captcha" i], [id*="captcha" i]');
+    if (generic) {
+      out.present = true;
+      out.vendor = 'other';
+      out.type = 'visible';
+    }
+  }
+  return out;
+})()
+"""
+
+# Best-effort observed-cap probe for multi-selects (probe_limits flag,
+# default OFF): select-and-fire-until-no-op — set each option selected,
+# dispatch click/input/change so the page's OWN JS enforcement runs (that
+# is the only place a silent cap lives — Empower's 10-item cap was declared
+# nowhere in the HTML; a plain DOM attribute read cannot see it), and count
+# how many stay selected. When the count stops growing the page has
+# refused selection N+1 → that IS the observed cap. Mutates the selection
+# temporarily and restores the original selection afterwards.
+MULTISELECT_PROBE_JS = """
+(() => {
+  const results = [];
+  const allForms = Array.from(document.forms);
+  for (let fi = 0; fi < allForms.length; fi++) {
+    const form = allForms[fi];
+    for (const el of Array.from(form.elements)) {
+      if ((el.tagName || '').toLowerCase() !== 'select' || !el.multiple) continue;
+      const name = el.getAttribute('name') || el.id || '(unnamed)';
+      const original = Array.from(el.options).filter((o) => o.selected).map((o) => o.value);
+      let observed = null;
+      let capped_by = null;
+      try {
+        for (const o of Array.from(el.options)) o.selected = false;
+        const n = el.options.length;
+        let last = 0;
+        for (let i = 0; i < n; i++) {
+          el.options[i].selected = true;
+          try { el.options[i].click(); } catch (_) {}
+          try {
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch (_) {}
+          const cnt = el.selectedOptions.length;
+          if (cnt <= last) {
+            observed = last;
+            capped_by = 'runtime-enforced (page JS refused selection #'
+              + (last + 1) + ')';
+            break;
+          }
+          last = cnt;
+        }
+        if (observed === null) {
+          observed = n;
+          capped_by = 'none observed: every option stays selectable';
+        }
+      } finally {
+        for (const o of Array.from(el.options)) o.selected = original.indexOf(o.value) !== -1;
+        try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
+      }
+      results.push({
+        form: form.getAttribute('name') || form.id || ('form[' + fi + ']'),
+        name: name,
+        option_count: el.options.length,
+        observed_cap: observed,
+        capped_by: capped_by,
+      });
+    }
+  }
+  return { probed: results };
+})()
+"""
+
+
+def _captcha_from_signals(signals: Optional[dict]) -> dict:
+    """Normalize the in-page captcha signals into the reported field.
+
+    Pure parser (unit-testable without a browser): ``present`` only for a
+    known vendor; ``type``/``sitekey`` only when present. Defensive against
+    a non-dict evaluate return (detect nothing rather than crash the tool).
+    """
+    s = signals if isinstance(signals, dict) else {}
+    vendor = (s.get("vendor") or "none")
+    if not isinstance(vendor, str):
+        return {"present": False, "vendor": "none", "type": None, "sitekey": None}
+    vendor = vendor.strip().lower() or "none"
+    present = bool(s.get("present")) and vendor != "none"
+    if not present:
+        return {"present": False, "vendor": "none", "type": None, "sitekey": None}
+    return {
+        "present": True,
+        "vendor": vendor,
+        "type": s.get("type") or None,
+        "sitekey": s.get("sitekey") or None,
+    }
+
+
+def _assemble_form_report(raw: Optional[dict]) -> dict:
+    """Assemble the dump_form report from the in-page extraction.
+
+    Belt-and-braces secret masking: the extraction JS already nulls
+    password values in the page, and this re-masks on the Python side so
+    the invariant holds even if the extraction output ever changes.
+    """
+    raw = raw or {}
+    forms = []
+    for form in raw.get("forms", []) or []:
+        controls = []
+        for c in form.get("controls", []) or []:
+            c = dict(c)
+            if c.get("is_secret") or (c.get("type") or "").lower() == "password":
+                c["is_secret"] = True
+                c["value"] = None
+                c["current_value"] = None
+            controls.append(c)
+        entry = dict(form)
+        entry["controls"] = controls
+        forms.append(entry)
+    return {"form_count": raw.get("form_count", len(forms)), "forms": forms}
+
+
 # ── Tool schemas ──────────────────────────────────────
 
 
@@ -176,11 +490,45 @@ def fill_credentials_schema() -> dict:
     }
 
 
+def dump_form_schema() -> dict:
+    return {
+        "name": "dump_form",
+        "description": (
+            "Introspect every form on the current page BEFORE filling: per "
+            "control — name, type, current value (passwords are NEVER "
+            "returned: is_secret instead), associated label, placeholder, "
+            "required/disabled/readonly/visibility, select options with "
+            "human labels, radio/checkbox group options with labels, HTML "
+            "limits (maxlength/minlength/min/max/pattern), captcha "
+            "presence, and — optionally — an observed multi-select cap "
+            "probe. Password values never leave the page."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "probe_limits": {
+                    "type": "boolean",
+                    "description": (
+                        "Best-effort runtime probe for multi-selects: "
+                        "click-until-no-op and report the ACTUAL observed "
+                        "selection cap (catches JS-enforced caps that are "
+                        "invisible in the HTML, e.g. a silent 10-item "
+                        "limit). Mutates the selection temporarily and "
+                        "restores it. Default: false (never mutates)."
+                    ),
+                    "default": False,
+                },
+            },
+        },
+    }
+
+
 ALL_SPATIAL_SCHEMAS = [
     browse_to_schema(),
     interact_schema(),
     extract_page_state_schema(),
     fill_credentials_schema(),
+    dump_form_schema(),
 ]
 
 
@@ -212,6 +560,7 @@ class SpatialToolHandlers:
             "interact": self._handle_interact,
             "extract_page_state": self._handle_extract_page_state,
             "fill_credentials": self._handle_fill_credentials,
+            "dump_form": self._handle_dump_form,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -335,6 +684,9 @@ class SpatialToolHandlers:
                 # MP-3: the egress identity this fetch presented — so the
                 # agent can distinguish "refusing bots" from "site down".
                 "egress": await self._egress_identity(page, agent_id),
+                # MP-4: captcha presence on the landed page (detect, never
+                # solve) — the agent sees it without a second call.
+                "captcha": await self._detect_captcha(page),
             }
         except Exception as e:
             logger.error("browse_to failed", extra={"url": url, "error": str(e)})
@@ -534,3 +886,54 @@ class SpatialToolHandlers:
                 extra={"origin": want_origin, "handle": handle, "error": str(e)},
             )
             return {"error": f"Failed to fill credential for {want_origin}: {str(e)}"}
+
+    # ── dump_form + captcha (MP-4, issues #18) ──────────
+
+    async def _detect_captcha(self, page: Any) -> dict:
+        """Detect (never solve) captcha presence on the current page.
+
+        Returns ``{present, vendor, type, sitekey}`` — vendor one of
+        ``recaptcha_v2 | recaptcha_v3 | hcaptcha | turnstile | other |
+        none``; ``type`` is ``invisible`` vs ``visible`` (an invisible
+        challenge that passed a real-UA session is worth knowing so the
+        agent proceeds; a visible one means hand off to the human).
+        """
+        try:
+            signals = await page.evaluate(CAPTCHA_JS)
+        except Exception as e:
+            logger.debug("captcha detection unavailable", extra={"error": str(e)})
+            return {"present": False, "vendor": "none", "type": None, "sitekey": None}
+        return _captcha_from_signals(signals)
+
+    async def _handle_dump_form(self, args: dict, agent_id: str) -> dict:
+        """Form introspection: per-control structure, limits, and captcha —
+        BEFORE the agent fills anything.
+
+        Read-only by default: the extraction is pure DOM (no clicks, no
+        mutation). The optional ``probe_limits`` flag additionally runs the
+        click-until-no-op multi-select cap probe (the ONLY way to see a
+        JS-enforced cap like Empower's silent 10-item limit — it is declared
+        nowhere in the HTML); the probe mutates the selection temporarily
+        and restores it, so it stays opt-in.
+
+        Password values NEVER leave the page: the extraction nulls them
+        in-page and ``_assemble_form_report`` re-masks on the Python side.
+        """
+        probe = bool(args.get("probe_limits", False))
+
+        browser = await self.browser_pool.get_browser(agent_id)
+        if not browser:
+            return {"error": f"Unable to get browser for agent {agent_id}"}
+        page = browser.page
+
+        try:
+            raw = await page.evaluate(DUMP_FORM_JS)
+            report = _assemble_form_report(raw)
+            report["captcha"] = await self._detect_captcha(page)
+            if probe:
+                probe_raw = await page.evaluate(MULTISELECT_PROBE_JS)
+                report["probe"] = (probe_raw or {}).get("probed", [])
+            return report
+        except Exception as e:
+            logger.error("dump_form failed", extra={"error": str(e)})
+            return {"error": f"Failed to dump form: {str(e)}"}

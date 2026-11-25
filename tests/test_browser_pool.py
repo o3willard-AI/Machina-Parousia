@@ -16,7 +16,12 @@ pytestmark = pytest.mark.skipif(not PLAYWRIGHT_AVAILABLE, reason="playwright not
 
 # Shared mock factory
 def _make_mock_browser():
-    """Create a fully mocked browser with correct async + is_connected behavior."""
+    """Create a fully mocked browser with correct async + is_connected behavior.
+
+    MP-3/MP-4 note: get_browser now also calls `add_init_script`, closes the
+    pre-existing health-check page, and creates a fresh page via
+    `new_page()` — all awaited — so those mocks must be async too.
+    """
     mock_pw_instance = MagicMock()
     mock_browser = MagicMock()
     mock_page = MagicMock()
@@ -24,6 +29,9 @@ def _make_mock_browser():
     mock_browser.browser = MagicMock()
     mock_browser.browser.is_connected.return_value = True
     mock_browser.close = AsyncMock()
+    mock_browser.add_init_script = AsyncMock()
+    mock_browser.new_page = AsyncMock(return_value=mock_page)
+    mock_page.close = AsyncMock()
     mock_pw_instance.stop = AsyncMock()
     mock_pw_instance.chromium = MagicMock()
     mock_pw_instance.chromium.launch_persistent_context = AsyncMock(return_value=mock_browser)

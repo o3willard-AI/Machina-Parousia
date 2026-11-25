@@ -284,10 +284,11 @@ class TestMCPRecorderWiring:
             + [s["name"] for s in ALL_TEMPORAL_SCHEMAS]
             + [s["name"] for s in ALL_SPATIAL_SCHEMAS]
         )
-        # MP-3: 3 email/inbox + 6 temporal + 4 spatial (fill_credentials
-        # added) = 13.
-        assert len(tools) == 13
+        # MP-4: 3 email/inbox + 6 temporal + 5 spatial (dump_form added
+        # after fill_credentials) = 14.
+        assert len(tools) == 14
         assert "fill_credentials" in tools
+        assert "dump_form" in tools
         # Every tool the server lists has a path through the dispatch
         # (formatter or explicit wiring) — the recorder saw ≥ the
         # write-capable subset.
