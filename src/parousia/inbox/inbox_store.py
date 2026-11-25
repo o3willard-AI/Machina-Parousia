@@ -160,6 +160,18 @@ class InboxStore:
         rows_affected = cursor.rowcount
         conn.close()
         return rows_affected > 0
+
+    def delete(self, message_id: str) -> bool:
+        """Delete a message by ID (MP-5). Returns whether a row was removed."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute(
+            "DELETE FROM inbox_messages WHERE id = ?",
+            (message_id,)
+        )
+        conn.commit()
+        rows_affected = cursor.rowcount
+        conn.close()
+        return rows_affected > 0
     
     def count_unread(self, agent_id: str) -> int:
         """Count unread messages for an agent."""
