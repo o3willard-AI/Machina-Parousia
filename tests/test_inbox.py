@@ -345,14 +345,10 @@ def test_count_unread():
 def test_ingest_endpoint_stores_inbox():
     """Integration test: Test that ingest endpoint stores messages in inbox."""
     try:
-        from parousia.config import ParousiaConfig, AgentConfig
+        from parousia.config import ParousiaConfig
 
+        # MP-7: no legacy agents dict — AccountStore is the single registry.
         config = ParousiaConfig()
-        config.agents = {
-            "test-agent": AgentConfig(
-                rate_limit_per_hour=1000,
-            )
-        }
 
         with patch("parousia.guard.rest_server.load_config", return_value=config), \
              patch("parousia.guard.rest_server._account_store") as mock_acct, \

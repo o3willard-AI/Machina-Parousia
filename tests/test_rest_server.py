@@ -41,16 +41,10 @@ def valid_payload():
 
 @pytest.fixture
 def agent_config():
-    """Mock agent config for testing."""
-    from parousia.config import ParousiaConfig, AgentConfig
+    """MP-7: configs carry no agent registry — the store is the registry."""
+    from parousia.config import ParousiaConfig
 
-    return ParousiaConfig(
-        agents={
-            "hermes": AgentConfig(
-                rate_limit_per_hour=100,
-            )
-        }
-    )
+    return ParousiaConfig()
 
 
 @pytest.fixture
@@ -67,15 +61,18 @@ def account_store(tmp_path):
 
 @pytest.fixture
 def empty_agent_config():
-    """Config with NO legacy agents — forces AccountStore lookup."""
+    """MP-7: configs carry no agent registry at all."""
     from parousia.config import ParousiaConfig
 
-    return ParousiaConfig(agents={})
+    return ParousiaConfig()
 
 
 def test_ingest_accepts_valid_payload(valid_payload, agent_config, account_store, monkeypatch):
+    """MP-7: hermes is valid because it is in AccountStore (migrated), not
+    because a config dict says so."""
     monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: agent_config)
     monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
+    account_store.ensure_account("hermes", rate_limit_per_hour=100)
     resp = client.post("/ingest", json=valid_payload)
     assert resp.status_code == 200
     data = resp.json()
@@ -144,15 +141,22 @@ def test_ingest_truly_unknown_agent_404(
     assert resp.status_code == 404
 
 
-def test_ingest_legacy_config_only_agent_still_accepted(
+def test_ingest_unmigrated_config_agent_rejected(
     valid_payload, agent_config, account_store, monkeypatch
 ):
-    """Agent in config.agents but NOT AccountStore → 200 (legacy fallback)."""
+    """MP-7 INVERSE of the old legacy fallback: hermes NOT migrated into
+    AccountStore → 404, full stop. Migrate with `parousia-guard
+    migrate-agents`; after migrating, ingest accepts (the test above)."""
     monkeypatch.setattr("parousia.guard.rest_server.load_config", lambda: agent_config)
     monkeypatch.setattr("parousia.guard.rest_server._account_store", account_store)
-    # agent_config has only "hermes"; account_store has nobody
+    # hermes was never migrated into the store.
     assert account_store.get_account("hermes") is None
 
+    resp = client.post("/ingest", json=valid_payload)
+    assert resp.status_code == 404
+
+    # Migrating un-blocks it: ensure_account → ingest accepts.
+    account_store.ensure_account("hermes", rate_limit_per_hour=100)
     resp = client.post("/ingest", json=valid_payload)
     assert resp.status_code == 200
     assert resp.json()["agent_id"] == "hermes"

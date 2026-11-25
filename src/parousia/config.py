@@ -11,10 +11,6 @@ import yaml
 from pydantic import BaseModel, Field
 
 
-class AgentConfig(BaseModel):
-    rate_limit_per_hour: int = 100
-
-
 class RedisConfig(BaseModel):
     host: str = "localhost"
     port: int = 6379
@@ -122,9 +118,12 @@ class InvitesConfig(BaseModel):
 
 
 class ParousiaConfig(BaseModel):
+    # MP-7: the legacy `agents` dict is GONE — AccountStore (accounts.db)
+    # is the single agent registry. A leftover `agents:` block in an old
+    # config.yaml is ignored (pydantic ignores extra keys on load); migrate
+    # it with `parousia-guard migrate-agents` and then delete the block.
     domain: str = "agents.yourdomain.com"
     hostname: str = "mx.agents.yourdomain.com"
-    agents: dict[str, AgentConfig] = Field(default_factory=dict)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     rate_limits: RateLimitConfig = Field(default_factory=RateLimitConfig)
     postfix: PostfixConfig = Field(default_factory=PostfixConfig)

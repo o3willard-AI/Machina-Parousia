@@ -135,12 +135,18 @@ def _resolve_sse_account(server: Server) -> tuple[Account | None, bool]:
     return _SESSION_ACCOUNTS.get(sid), True
 
 
-def _resolve_agent_id(config, arguments: dict) -> str:
-    """Resolve agent_id from arguments, then config fallback."""
+def _resolve_agent_id(arguments: dict) -> str:
+    """Resolve agent_id from an explicit argument; "default" when absent.
+
+    MP-7: the legacy YAML agents block is GONE — AccountStore is the single
+    registry, so there is no first-configured-agent fallback here. The
+    account-scoped tools resolve through the authenticated account in the
+    dispatch (contextvar → SSE session → "default"); this helper only
+    honors an explicit ``agent_id`` argument.
+    """
     if arguments.get("agent_id"):
         return arguments["agent_id"]
-    agent_ids = list(config.agents.keys())
-    return agent_ids[0] if agent_ids else "default"
+    return "default"
 
 
 def _build_server() -> tuple[Server, AccountStore]:
@@ -346,17 +352,17 @@ def _build_server() -> tuple[Server, AccountStore]:
         # and reaches dispatch through the message's own Request (see
         # _resolve_sse_account — the POST wrapper's contextvar does not
         # cross the task boundary). Stdio transport: auth optional —
-        # contextvar, then config fallback.
+        # contextvar, then the "default" sentinel.
         account = get_auth_context()
         sse_account, via_sse = _resolve_sse_account(server)
         if account is None:
             account = sse_account
         if via_sse and account is None:
             # MP-1: fail closed. An SSE call with no authenticated account
-            # must NEVER fall back to config.agents[0] — that fallback is
-            # what scoped a failed auth to the first agent's inbox in the
-            # live incident. (Config fallback survives only on the
-            # stdio/no-auth path below.)
+            # must NEVER fall back to any first-agent default — that
+            # fallback is what scoped a failed auth to the first agent's
+            # inbox in the live incident. (The "default" sentinel survives
+            # only on the stdio/no-auth path below.)
             logger.error(
                 "SSE tool call rejected: no authenticated account (tool=%s)", name
             )
@@ -369,14 +375,14 @@ def _build_server() -> tuple[Server, AccountStore]:
         # RAE L0: attribute every recorded action to the authenticated account's
         # human sponsor (empty string when there is no account or sponsor).
         sponsor = account.sponsor_id if account and account.sponsor_id else ""
-        agent_id = agent_id_override or _resolve_agent_id(config, arguments)
+        agent_id = agent_id_override or _resolve_agent_id(arguments)
 
         # ── Phase 1: send_email ────────────────────
         if name == "send_email":
             # account is the authenticated Account (None on stdio w/o auth).
             # account_store is the module-scoped singleton (passed via closure).
-            # Both are consulted so send_email can validate from_agent against
-            # BOTH registries (AccountStore + legacy config.agents).
+            # MP-7: AccountStore is the single registry — send_email validates
+            # from_agent against it and has no other place to look.
             result_content = await _handle_send_email(arguments, config, rate_limiter, redis_client, account, account_store)
             try:
                 memory_recorder.record_tool_call(
@@ -544,12 +550,13 @@ async def _handle_send_email(
 ) -> list[TextContent]:
     """Handle send_email tool call (Phase 1).
 
-    The authenticated ``account`` (None when the caller used stdio transport
-    without auth) is consulted first: if the caller supplies ``from_agent`` it
-    must match the authenticated account, otherwise the agent_id falls back to
-    ``from_agent`` or the first configured agent.  Agent validity is resolved
-    against AccountStore (modern source of truth) with a legacy config.agents
-    fallback so that config-only agents (mr-krabs, atlas) keep working.
+    MP-7: AccountStore is the SINGLE registry. The authenticated
+    ``account`` (None on the stdio/no-auth path) is the strongest signal;
+    an authenticated caller may only send ``from_agent`` as itself. On
+    stdio without auth, ``from_agent`` must name a real AccountStore
+    account (or be omitted for the "default" sentinel). There is no legacy
+    YAML fallback: an agent unknown to AccountStore is refused with the
+    active AccountStore account ids as ``available_agents``.
     """
     to = arguments["to"]
     subject = arguments["subject"]
@@ -557,52 +564,63 @@ async def _handle_send_email(
     reply_to = arguments.get("reply_to")
 
     # ── Resolve agent_id ────────────────────────
-    # Authenticated caller's account is the strongest signal.  On stdio
-    # without auth the caller may pass from_agent explicitly; otherwise we
-    # fall back to the first configured agent.
+    # Authenticated caller's account is the strongest signal. On stdio
+    # without auth the caller may pass from_agent explicitly; with no
+    # from_agent the "default" sentinel applies (MP-7: no first-agent
+    # fallback — AccountStore is the single registry).
     if account is not None:
         requested_agent = arguments.get("from_agent")
         if requested_agent and requested_agent != account.account_id:
             # Caller is authenticated as ``account`` but is trying to send
-            # *as* a different agent.  Only allow it if that agent doesn't
-            # exist as an AccountStore account (legacy passthrough).
-            if account_store is not None:
-                other_acct = account_store.get_account(requested_agent)
-                if other_acct is not None and other_acct.status == "active":
-                    return [TextContent(
-                        type="text",
-                        text=json.dumps({
-                            "sent": False,
-                            "error": f"You are authenticated as '{account.account_id}', not '{requested_agent}'.",
-                        }),
-                    )]
-        agent_id = requested_agent or account.account_id
-    else:
-        # Stdio (no auth): behave as before — from_agent or first config agent.
-        agent_id = arguments.get("from_agent")
-        if not agent_id:
-            agent_ids = list(config.agents.keys())
-            agent_id = agent_ids[0] if agent_ids else "default"
-
-    # ── Validate agent exists (both registries) ──
-    if agent_id != "default":
-        acct = account_store.get_account(agent_id) if account_store is not None else None
-        if acct is not None:
-            if acct.status != "active":
+            # *as* a different agent. MP-7: with the legacy registry gone,
+            # cross-account sends are refused outright when the target
+            # exists as an active AccountStore account — and also when no
+            # store is available to validate it (fail closed).
+            other_acct = (
+                account_store.get_account(requested_agent)
+                if account_store is not None
+                else None
+            )
+            if other_acct is None or other_acct.status == "active":
                 return [TextContent(
                     type="text",
                     text=json.dumps({
                         "sent": False,
-                        "error": f"Account '{agent_id}' is {acct.status}",
+                        "error": f"You are authenticated as '{account.account_id}', not '{requested_agent}'.",
                     }),
                 )]
-        elif agent_id not in config.agents:
+        agent_id = requested_agent or account.account_id
+    else:
+        # Stdio (no auth): explicit from_agent or the "default" sentinel.
+        agent_id = arguments.get("from_agent") or "default"
+
+    # ── Validate agent exists (AccountStore: the single registry) ──
+    if agent_id != "default":
+        acct = (
+            account_store.get_account(agent_id)
+            if account_store is not None
+            else None
+        )
+        if acct is None:
+            available = (
+                account_store.list_account_ids(active_only=True)
+                if account_store is not None
+                else []
+            )
             return [TextContent(
                 type="text",
                 text=json.dumps({
                     "sent": False,
                     "error": f"Unknown agent: {agent_id}",
-                    "available_agents": list(config.agents.keys()),
+                    "available_agents": available,
+                }),
+            )]
+        if acct.status != "active":
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "sent": False,
+                    "error": f"Account '{agent_id}' is {acct.status}",
                 }),
             )]
 

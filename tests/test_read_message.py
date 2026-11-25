@@ -25,7 +25,7 @@ from mcp.types import CallToolRequest, CallToolRequestParams
 
 from parousia.auth.accounts import AccountStore
 from parousia.auth.mcp_auth import set_auth_context
-from parousia.config import AgentConfig, ParousiaConfig
+from parousia.config import ParousiaConfig
 from parousia.guard import mcp_server
 from parousia.guard.mcp_server import _build_server
 from parousia.inbox.inbox_store import InboxMessage, InboxStore
@@ -77,10 +77,9 @@ def server_and_inbox(monkeypatch, tmp_path):
     inbox.store_message(_msg("hermes", "msg-hermes-1", body="hermes private body"))
     inbox.store_message(_msg("ricky", "msg-ricky-1", body="ricky private body"))
 
-    config = ParousiaConfig(
-        domain="agents.test.com",
-        agents={"hermes": AgentConfig(), "ricky": AgentConfig()},
-    )
+    # MP-7: no legacy agents dict — the harness accounts live in the
+    # AccountStore (ricky_account fixture); config carries no registry.
+    config = ParousiaConfig(domain="agents.test.com")
 
     import fakeredis
 
@@ -256,16 +255,20 @@ async def test_sse_call_without_account_fails_closed(server_and_inbox):
 
 
 @pytest.mark.asyncio
-async def test_stdio_without_auth_keeps_config_fallback(server_and_inbox):
-    """The stdio/no-auth path keeps its documented fallback (config.agents[0]).
+async def test_stdio_without_auth_resolves_to_default_sentinel(server_and_inbox):
+    """MP-7: the stdio/no-auth path resolves to the "default" sentinel.
 
-    Fix 1 only closes the SSE path; stdio (local CLI) without auth still
-    resolves to the first configured agent as before.
+    The legacy first-configured-agent fallback is GONE (AccountStore is
+    the single registry) — an unauthenticated check_inbox with no
+    agent_id NEVER lands in a real agent's inbox (here: hermes' mail is
+    invisible; "default" has an empty inbox).
     """
     server, inbox, config = server_and_inbox
     result = await _dispatch(server, "check_inbox", {})
-    assert result["count"] == 1, result
-    assert result["messages"][0]["id"] == "msg-hermes-1", result
+    assert result["count"] == 0, result
+    assert result["messages"] == [], result
+    # And hermes' mail is still there — untouched by the sentinel path.
+    assert inbox.get_message("msg-hermes-1") is not None
 
 
 # ── Fix 1: session-id capture (replaces list(...)[-1]) ──────────────

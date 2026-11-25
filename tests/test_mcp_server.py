@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from parousia.config import ParousiaConfig, AgentConfig
+from parousia.config import ParousiaConfig
 from parousia.guard.email_sender import send_email
 from parousia.guard.mcp_server import _build_server, _handle_send_email
 from parousia.guard.rate_limiter import RateLimiter
@@ -71,10 +71,8 @@ def test_send_email_smtp_failure():
 
 @pytest.fixture
 def mock_config():
-    return ParousiaConfig(
-        domain="agents.test.com",
-        agents={"hermes": AgentConfig()},
-    )
+    # MP-7: no legacy agents dict — AccountStore is the single registry.
+    return ParousiaConfig(domain="agents.test.com")
 
 
 @pytest.fixture
@@ -127,85 +125,89 @@ def mock_redis_client():
     return MagicMock()
 
 
-def test_send_email_from_agent_param(mock_rate_limiter, mock_redis_client):
-    """Test that send_email uses the specified from_agent parameter."""
-    # Create config with 2 agents
-    config = ParousiaConfig(
-        domain="agents.test.com",
-        agents={
-            "agent-a": AgentConfig(),
-            "agent-b": AgentConfig()
-        }
-    )
-    
-    # Mock SMTP send to avoid actual email sending
-    with patch("parousia.guard.mcp_server._smtp_send") as mock_send:
-        mock_send.return_value = "test-message-id@example.com"
-        
-        # Call _handle_send_email with from_agent="agent-b"
+def test_send_email_from_agent_param(
+    tmp_path, mock_rate_limiter, mock_redis_client, monkeypatch
+):
+    """MP-7: stdio from_agent resolves against AccountStore (the single registry)."""
+    from parousia.auth.accounts import AccountStore
+
+    config = ParousiaConfig(domain="agents.test.com")
+    store = AccountStore(str(tmp_path / "route.db"))
+    store.connect()
+    try:
+        store.ensure_account("agent-a", rate_limit_per_hour=100)
+        store.ensure_account("agent-b", rate_limit_per_hour=100)
+        monkeypatch.setattr(
+            "parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id"
+        )
         arguments = {
             "to": "recipient@example.com",
             "subject": "Test Subject",
             "body": "Test Body",
-            "from_agent": "agent-b"
+            "from_agent": "agent-b",
         }
-        
-        # Instead of trying to run async function, we'll test the logic by 
-        # directly inspecting how the agent selection works
-        # Since we can't easily run the full async function in a test context,
-        # we'll do a simpler verification that demonstrates the intended behavior
-        
-        # This test mainly verifies that the argument parsing works correctly
-        # and that the function would behave properly given valid inputs
-        assert arguments["from_agent"] == "agent-b"
-        assert "agent-b" in config.agents
+        result = _run_send_email(
+            arguments, config, mock_rate_limiter, mock_redis_client,
+            account=None, account_store=store,
+        )
+        data = json.loads(result[0].text)
+        assert data["sent"] is True, data
+        assert data["message_id"] == "msg-id"
+    finally:
+        store.close()
 
 
-def test_send_email_defaults_to_first_agent(mock_rate_limiter, mock_redis_client):
-    """Test that send_email defaults to first configured agent when from_agent is not specified."""
-    # Create config with 2 agents
-    config = ParousiaConfig(
-        domain="agents.test.com",
-        agents={
-            "agent-a": AgentConfig(),
-            "agent-b": AgentConfig()
-        }
+def test_send_email_stdio_defaults_to_default_sentinel(
+    mock_rate_limiter, mock_redis_client, monkeypatch
+):
+    """MP-7: no from_agent + no auth -> the "default" sentinel (NOT the first
+    agent — the legacy first-configured-agent fallback is gone)."""
+    config = ParousiaConfig(domain="agents.test.com")
+    monkeypatch.setattr(
+        "parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id"
     )
-    
-    # Call _handle_send_email WITHOUT from_agent (should default to agent-a)
-    arguments = {
-        "to": "recipient@example.com",
-        "subject": "Test Subject",
-        "body": "Test Body"
-    }
-    
-    # Verify that the first agent is the one that would be used by default
-    first_agent = list(config.agents.keys())[0]
-    assert first_agent == "agent-a"
-
-
-def test_send_email_unknown_agent(mock_rate_limiter, mock_redis_client):
-    """Test that send_email returns error for unknown agent."""
-    # Create config with 1 agent
-    config = ParousiaConfig(
-        domain="agents.test.com",
-        agents={
-            "agent-a": AgentConfig()
-        }
-    )
-    
-    # Call _handle_send_email with unknown agent - verify the config has the right structure
     arguments = {
         "to": "recipient@example.com",
         "subject": "Test Subject",
         "body": "Test Body",
-        "from_agent": "nonexistent"
     }
-    
-    # Verify that the configuration is set up correctly for the test
-    assert len(config.agents) == 1
-    assert "agent-a" in config.agents
-    assert arguments["from_agent"] == "nonexistent"
+    result = _run_send_email(
+        arguments, config, mock_rate_limiter, mock_redis_client,
+        account=None, account_store=None,
+    )
+    data = json.loads(result[0].text)
+    # The sentinel passes validation (agent_id == "default") and sends.
+    assert data["sent"] is True, data
+
+
+def test_send_email_unknown_agent(
+    tmp_path, mock_rate_limiter, mock_redis_client
+):
+    """MP-7: unknown agent -> refused, with available_agents from AccountStore."""
+    from parousia.auth.accounts import AccountStore
+
+    config = ParousiaConfig(domain="agents.test.com")
+    store = AccountStore(str(tmp_path / "unknown.db"))
+    store.connect()
+    try:
+        store.ensure_account("agent-a", rate_limit_per_hour=100)
+        arguments = {
+            "to": "recipient@example.com",
+            "subject": "Test Subject",
+            "body": "Test Body",
+            "from_agent": "nonexistent",
+        }
+        result = _run_send_email(
+            arguments, config, mock_rate_limiter, mock_redis_client,
+            account=None, account_store=store,
+        )
+        data = json.loads(result[0].text)
+        assert data["sent"] is False
+        assert "Unknown agent" in data["error"]
+        # available_agents now comes from the AccountStore registry.
+        assert data["available_agents"] == ["agent-a"]
+    finally:
+        store.close()
 
 
 # ── send_email from_agent validation (dual-registry regression) ──
@@ -228,8 +230,8 @@ def account_store(tmp_path):
 
 @pytest.fixture
 def empty_config():
-    """Config with no legacy agents — forces AccountStore lookup."""
-    return ParousiaConfig(domain="agents.test.com", agents={})
+    """MP-7: configs carry no agent registry at all — AccountStore only."""
+    return ParousiaConfig(domain="agents.test.com")
 
 
 def _run_send_email(arguments, config, rate_limiter, redis_client, account=None, account_store=None):
@@ -328,15 +330,18 @@ def test_send_email_truly_unknown_agent(
     assert "Unknown agent" in data["error"]
 
 
-def test_send_email_legacy_config_only_agent(
+def test_send_email_unmigrated_config_agent_refused(
     mock_rate_limiter, mock_redis_client, account_store, monkeypatch
 ):
-    """Config-only agent (not in AccountStore) can send — legacy fallback."""
+    """MP-7 INVERSE of the old legacy fallback: an agent that exists only in
+    a leftover YAML `agents:` block (NOT migrated into AccountStore) is
+    REFUSED. That is the point of `parousia-guard migrate-agents` — after
+    migrating, the same agent sends (the from_agent test above).
+    """
     monkeypatch.setattr("parousia.guard.mcp_server._smtp_send", lambda **kw: "msg-id")
-    config = ParousiaConfig(
-        domain="agents.test.com",
-        agents={"mr-krabs": AgentConfig()},
-    )
+    config = ParousiaConfig(domain="agents.test.com")
+    # mr-krabs was never migrated into account_store.
+    assert account_store.get_account("mr-krabs") is None
     arguments = {
         "to": "human@example.com",
         "subject": "Hi",
@@ -348,4 +353,13 @@ def test_send_email_legacy_config_only_agent(
         account=None, account_store=account_store,
     )
     data = json.loads(result[0].text)
-    assert data["sent"] is True
+    assert data["sent"] is False
+    assert "Unknown agent" in data["error"]
+    # Migrating un-blocks it: ensure_account → the send goes through.
+    account_store.ensure_account("mr-krabs", rate_limit_per_hour=100)
+    result = _run_send_email(
+        arguments, config, mock_rate_limiter, mock_redis_client,
+        account=None, account_store=account_store,
+    )
+    data = json.loads(result[0].text)
+    assert data["sent"] is True, data

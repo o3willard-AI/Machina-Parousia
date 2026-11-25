@@ -26,16 +26,31 @@ def test_redis_status_ok():
     assert metrics["redis"]["status"] in ("ok", "error")
 
 
-def test_rate_limits_returned():
-    from parousia.config import AgentConfig
+def test_rate_limits_returned(tmp_path):
+    """MP-7: per-agent counters come from the AccountStore registry."""
+    from parousia.auth.accounts import AccountStore
 
-    config = ParousiaConfig(
-        agents={"hermes": AgentConfig(rate_limit_per_hour=100)},
-    )
+    config = ParousiaConfig()
     r = fakeredis.FakeRedis()
-    metrics = collect_metrics(config, r)
+
+    store = AccountStore(str(tmp_path / "mon.db"))
+    store.connect()
+    try:
+        store.ensure_account("hermes", rate_limit_per_hour=100)
+        metrics = collect_metrics(config, r, account_store=store)
+    finally:
+        store.close()
     assert "per_agent" in metrics["rate_limits"]
     assert "hermes" in metrics["rate_limits"]["per_agent"]
+
+
+def test_rate_limits_without_store_skips_per_agent():
+    """MP-7: no AccountStore → per-agent section empty (domain still reports)."""
+    config = ParousiaConfig()
+    r = fakeredis.FakeRedis()
+    metrics = collect_metrics(config, r, account_store=None)
+    assert metrics["rate_limits"]["per_agent"] == {}
+    assert "domain" in metrics["rate_limits"]
 
 
 def test_no_temporal_key_when_db_is_none():
