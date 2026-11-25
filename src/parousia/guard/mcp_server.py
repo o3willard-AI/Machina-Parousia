@@ -307,6 +307,32 @@ def _build_server() -> tuple[Server, AccountStore]:
                 "required": ["pattern"],
             },
         ))
+        # MP-5: inbox triage — mark_read / archive / delete, agent-isolated
+        # exactly like read_message (the message must be the caller's own).
+        for _triage_name, _triage_verb, _triage_key in (
+            ("mark_read", "Mark", "marked"),
+            ("archive", "Archive", "archived"),
+            ("delete", "Delete", "deleted"),
+        ):
+            tools.append(Tool(
+                name=_triage_name,
+                description=(
+                    f"{_triage_verb} one of YOUR inbox messages as "
+                    f"{_triage_key} by message ID. Only operates on messages "
+                    "stored for the authenticated agent; another agent's "
+                    "message id is refused."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "message_id": {
+                            "type": "string",
+                            "description": "Message ID from check_inbox",
+                        },
+                    },
+                    "required": ["message_id"],
+                },
+            ))
         return tools
 
     # ── Tool dispatch ────────────────────────────────
@@ -423,6 +449,41 @@ def _build_server() -> tuple[Server, AccountStore]:
             )]
             try:
                 memory_recorder.record_tool_call("read_message", arguments, result_dict, agent_id, sponsor=sponsor)
+            except Exception:
+                pass
+            return result
+
+        # ── MP-5: inbox triage — mark_read / archive / delete ─────
+        # Mirrors read_message's isolation exactly: resolve the message,
+        # refuse anything not stored for THIS agent (indistinguishable
+        # from absent), then act. The agent_id resolution above is the
+        # same SSE-account scoping check_inbox/read_message use.
+        if name in ("mark_read", "archive", "delete"):
+            message_id = arguments.get("message_id")
+            if not message_id:
+                result_dict = {"error": "message_id is required"}
+            else:
+                msg = inbox_store.get_message(message_id)
+                if msg is None:
+                    # Clean not-found, never a 500.
+                    result_dict = {"error": "message not found"}
+                elif msg.agent_id != agent_id:
+                    # Same isolation as read_message: a message stored for
+                    # a different agent_id is NEVER touched — reported
+                    # "not your message", indistinguishable from absent.
+                    result_dict = {"error": "not your message"}
+                elif name == "mark_read":
+                    result_dict = {"marked": inbox_store.mark_read(message_id)}
+                elif name == "archive":
+                    result_dict = {"archived": inbox_store.archive(message_id)}
+                else:  # delete
+                    result_dict = {"deleted": inbox_store.delete(message_id)}
+            result = [TextContent(
+                type="text",
+                text=json.dumps(result_dict),
+            )]
+            try:
+                memory_recorder.record_tool_call(name, arguments, result_dict, agent_id, sponsor=sponsor)
             except Exception:
                 pass
             return result
