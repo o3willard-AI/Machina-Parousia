@@ -22,6 +22,51 @@ class SpatialConfig:
     idle_timeout_seconds: int = 300
     max_instances: int = 10
     launch_args: list = field(default_factory=lambda: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--headless=new"])
+    # ── MP-3 (part A): identity & egress control (issue #16). Kept in
+    # sync with parousia.config.SpatialConfig (the canonical pydantic
+    # config used by the MCP server); this dataclass is the standalone/
+    # legacy shape used by the CLI. ──
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+    )
+    viewport_width: int = 1280
+    viewport_height: int = 800
+    locale: str = "en-US"
+    timezone_id: str = "America/Los_Angeles"
+    # agent_id -> proxy URL; default egress proxy; "" = direct (off).
+    proxy_servers: dict = field(default_factory=dict)
+    proxy_default: str = ""
+
+# MP-3: suppress the automation-controlled signals on every page. Blink's
+# AutomationControlled feature is disabled at launch (a launch arg, below);
+# this init script additionally normalizes the JS-visible surface.
+_WEBDRIVER_SUPPRESSION_SCRIPT = """
+(() => {
+  // navigator.webdriver: the canonical headless tell (set by Blink's
+  // automation; --disable-blink-features=AutomationControlled already
+  // suppresses most of it — this pins the JS view to `false`).
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => false, configurable: true,
+    });
+    // Normal-looking languages (matches the configured en-US locale).
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'], configurable: true,
+    });
+    // A non-empty plugins array (headless reports zero plugins).
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const arr = [1, 2, 3, 4, 5].map((i) => ({ name: `Plugin ${i}` }));
+        arr.item = (i) => arr[i] || null;
+        arr.namedItem = (n) => arr.find((p) => p.name === n) || null;
+        return arr;
+      },
+      configurable: true,
+    });
+  } catch (_) { /* page overrode it — best effort */ }
+})();
+"""
 
 class ProfileInUseError(Exception):
     """Raised when a profile is already in use by another agent."""
@@ -51,6 +96,9 @@ class BrowserInstance:
     launched_at: float
     last_used_at: float
     pid: int
+    # MP-3: the identity this browser presents (effective UA after any
+    # per-navigation override is applied by the tools layer, not here).
+    user_agent: str = ""
 
     def is_alive(self) -> bool:
         """Check if the browser is still connected and alive.
@@ -122,6 +170,55 @@ class BrowserPoolManager:
                 lock_file.unlink()
             except Exception:
                 pass
+
+    def _launch_kwargs(self, agent_id: str) -> dict:
+        """MP-3 (part A): per-agent launch kwargs for the identity + egress.
+
+        Applies the configured identity (UA / viewport / locale / timezone)
+        and the egress proxy selection. Called from ``get_browser`` only, so
+        the identity is consistent for the life of the persistent context.
+        """
+        cfg = self.config
+        args = list(getattr(cfg, "launch_args", []) or [])
+        # Webdriver suppression at the Blink level: the flag that stops
+        # Chrome from flipping automation-controlled signals. Appended
+        # (config launch_args may already carry it).
+        flag = "--disable-blink-features=AutomationControlled"
+        if flag not in args:
+            args.append(flag)
+
+        kwargs: dict = {
+            "user_data_dir": None,  # set by caller (profile_dir)
+            "headless": True,
+            "args": args,
+        }
+        ua = getattr(cfg, "user_agent", "")
+        if ua:
+            kwargs["user_agent"] = ua
+        width = int(getattr(cfg, "viewport_width", 0) or 0)
+        height = int(getattr(cfg, "viewport_height", 0) or 0)
+        if width > 0 and height > 0:
+            kwargs["viewport"] = {"width": width, "height": height}
+        if getattr(cfg, "locale", ""):
+            kwargs["locale"] = cfg.locale
+        if getattr(cfg, "timezone_id", ""):
+            kwargs["timezone_id"] = cfg.timezone_id
+        proxy = self.proxy_for(agent_id)
+        if proxy:
+            kwargs["proxy"] = {"server": proxy}
+        return kwargs
+
+    def proxy_for(self, agent_id: str) -> str:
+        """MP-3: the egress proxy URL for an agent ("" = direct, default off).
+
+        Config-driven per-agent selection: ``proxy_servers[agent_id]`` if
+        mapped, else ``proxy_default`` ("" = direct egress).
+        """
+        servers = getattr(self.config, "proxy_servers", None) or {}
+        explicit = servers.get(agent_id)
+        if explicit:
+            return explicit
+        return getattr(self.config, "proxy_default", "") or ""
 
     async def get_browser(self, agent_id: str) -> BrowserInstance:
         """Get a browser instance for the given agent ID.
@@ -209,10 +306,13 @@ class BrowserPoolManager:
         for attempt in range(3):
             try:
                 playwright = await async_playwright().start()
+                # MP-3 (part A): identity + egress kwargs per agent
+                # (UA/viewport/locale/timezone from config; proxy selection
+                # config-driven, default off).
+                launch_kwargs = self._launch_kwargs(agent_id)
+                launch_kwargs["user_data_dir"] = str(profile_dir)
                 browser = await playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(profile_dir),
-                    headless=True,
-                    args=self.config.launch_args
+                    **launch_kwargs
                 )
 
                 # Health check - create a page and make sure it's working
@@ -236,6 +336,21 @@ class BrowserPoolManager:
                 else:
                     raise BrowserUnavailableError(f"Failed to launch browser after {attempt + 1} attempts: {str(e)}")
 
+        # MP-3 (part A): webdriver suppression. The init script applies to
+        # pages created AFTER it is registered, so close any pre-existing
+        # page (the health-check page) and create a fresh one — the agent's
+        # persistent page then reports navigator.webdriver === false.
+        try:
+            await browser.add_init_script(_WEBDRIVER_SUPPRESSION_SCRIPT)
+        except Exception:
+            pass  # best effort — the launch flag already did the heavy lift
+        for existing in list(getattr(browser, "pages", [])):
+            try:
+                await existing.close()
+            except Exception:
+                pass
+        page = await browser.new_page()
+
         # Create the BrowserInstance
         browser_instance = BrowserInstance(
             agent_id=agent_id,
@@ -246,7 +361,8 @@ class BrowserPoolManager:
             profile_dir=profile_dir,
             launched_at=time.time(),
             last_used_at=time.time(),
-            pid=os.getpid()
+            pid=os.getpid(),
+            user_agent=getattr(self.config, "user_agent", "") or "",
         )
 
         self._browsers[agent_id] = browser_instance

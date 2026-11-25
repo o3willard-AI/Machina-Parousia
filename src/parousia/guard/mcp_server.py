@@ -12,6 +12,8 @@ import asyncio
 import contextvars
 import json
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -35,6 +37,7 @@ from parousia.spatial.serializer import SpatialSerializer
 from parousia.spatial.tools import ALL_SPATIAL_SCHEMAS, SpatialToolHandlers
 from parousia.temporal.db import TemporalDB
 from parousia.temporal.tools import ALL_TEMPORAL_SCHEMAS, TemporalToolHandlers
+from parousia.vault.credential_store import CredentialStore
 
 logger = logging.getLogger("parousia.mcp")
 
@@ -169,7 +172,22 @@ def _build_server() -> tuple[Server, AccountStore]:
     # Initialize spatial browser pool and tool handlers (Phase 3)
     browser_pool = BrowserPoolManager(config.spatial)
     spatial_serializer = SpatialSerializer()
-    spatial_handlers = SpatialToolHandlers(config, browser_pool, spatial_serializer)
+    # MP-3 (part B): server-side credential store for fill_credentials.
+    # Falls back to an in-memory store when the deployed path is unwritable
+    # (tests, non-root) — the tool then answers "no credential stored"
+    # rather than failing server startup.
+    try:
+        credential_store = CredentialStore(
+            config.credential_store.db_path,
+            config.credential_store.key_path,
+        )
+        credential_store.connect()
+    except Exception:
+        credential_store = CredentialStore(":memory:", str(Path(tempfile.gettempdir()) / "parousia-cred.key"))
+        credential_store.connect()
+    spatial_handlers = SpatialToolHandlers(
+        config, browser_pool, spatial_serializer, credential_store=credential_store
+    )
 
     server = Server("parousia-guard-mcp")
 

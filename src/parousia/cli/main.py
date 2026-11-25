@@ -410,6 +410,10 @@ cli.add_command(monitor)
 from parousia.cli.spatial import spatial_group
 cli.add_command(spatial_group)
 
+# ── Vault group (MP-3 part B) ────────────────────────────────────────
+from parousia.cli.vault import vault_group
+cli.add_command(vault_group)
+
 # ── Invite group (invite-gated onboarding) ────────────────────────────
 
 

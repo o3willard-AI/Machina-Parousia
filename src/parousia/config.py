@@ -62,6 +62,16 @@ class Crawl4aiConfig(BaseModel):
     timeout_ms: int = 15000
 
 
+# MP-3 (part A): the default browser identity — a current desktop Chrome UA.
+# The previous default presented Playwright's headless signature
+# (UA "HeadlessChrome", navigator.webdriver set) and was refused by
+# bot-signature WAFs (CloudFront) before any tool could help.
+DEFAULT_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+)
+
+
 class SpatialConfig(BaseModel):
     enabled: bool = True
     chromium_path: str = "/usr/bin/chromium-browser"
@@ -69,7 +79,34 @@ class SpatialConfig(BaseModel):
     idle_timeout_seconds: int = 300
     max_instances: int = 10
     launch_args: list[str] = Field(default_factory=list)
+    # ── MP-3 (part A): identity & egress control (GitHub issue #16) ──
+    # Per-agent browser identity. Defaults present a realistic desktop
+    # Chrome; all fields are config-overridable.
+    user_agent: str = DEFAULT_CHROME_UA
+    viewport_width: int = 1280
+    viewport_height: int = 800
+    locale: str = "en-US"
+    timezone_id: str = "America/Los_Angeles"
+    # Egress proxy selection (config-driven, default OFF = direct egress):
+    # agent_id -> proxy URL (any scheme Playwright supports, e.g.
+    # "http://user:pass@proxy:8080" or "socks5://proxy:1080").
+    proxy_servers: dict[str, str] = Field(default_factory=dict)
+    # Default egress proxy for agents with no explicit mapping ("" = direct).
+    proxy_default: str = ""
     crawl4ai: Crawl4aiConfig = Field(default_factory=Crawl4aiConfig)
+
+
+class CredentialStoreConfig(BaseModel):
+    """MP-3 (part B): server-side credential store for the browser.
+
+    SQLite + Fernet encryption at rest. Admin/human-populated only (the
+    `parousia-guard vault add` CLI); agents never add or read secrets —
+    they can only request an origin-bound fill via `fill_credentials`,
+    which returns a fill summary, never the secret.
+    """
+
+    db_path: str = "/var/lib/parousia/credentials.db"
+    key_path: str = "/var/lib/parousia/credential_store.key"
 
 
 class AccountStoreConfig(BaseModel):
@@ -96,6 +133,7 @@ class ParousiaConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
+    credential_store: CredentialStoreConfig = Field(default_factory=CredentialStoreConfig)
     account_store: AccountStoreConfig = Field(default_factory=AccountStoreConfig)
     admin: AdminConfig = Field(default_factory=AdminConfig)
     invites: InvitesConfig = Field(default_factory=InvitesConfig)
