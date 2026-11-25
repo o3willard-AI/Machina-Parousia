@@ -381,6 +381,44 @@ class TestMemoryRecorder:
         # Should have been attempted
         assert call_count[0] == 6
 
+    def test_infer_false_by_default(self):
+        """infer is OFF by default (MP-2): the write passes infer=False so
+        mem0 stores the fact verbatim and never contacts an LLM."""
+        recorder = MemoryRecorder(Mem0Config())
+        mock_memory = MagicMock()
+        recorder._get_memory = lambda: mock_memory
+
+        recorder.record_tool_call(
+            "schedule_event",
+            {"title": "T", "start_time": "2026-01-01T00:00:00Z", "flexibility": "high"},
+            {"conflicts": [], "recorded": True},
+            "agent",
+        )
+        if recorder._sync_thread:
+            recorder._sync_thread.join(timeout=2.0)
+
+        _, kwargs = mock_memory.add.call_args
+        assert kwargs["infer"] is False
+
+    def test_infer_true_passes_through_from_config(self):
+        """Configuring infer=True flows into the mem0 add() call (fact
+        extraction via the configured LLM — OpenRouter in production)."""
+        recorder = MemoryRecorder(Mem0Config(infer=True))
+        mock_memory = MagicMock()
+        recorder._get_memory = lambda: mock_memory
+
+        recorder.record_tool_call(
+            "schedule_event",
+            {"title": "T", "start_time": "2026-01-01T00:00:00Z", "flexibility": "high"},
+            {"conflicts": [], "recorded": True},
+            "agent",
+        )
+        if recorder._sync_thread:
+            recorder._sync_thread.join(timeout=2.0)
+
+        _, kwargs = mock_memory.add.call_args
+        assert kwargs["infer"] is True
+
     def test_record_tool_call_includes_sponsor(self, monkeypatch):
         """The human sponsor is recorded in the Mem0 fact.
 
