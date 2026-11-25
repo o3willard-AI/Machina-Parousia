@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import uuid
 from datetime import datetime
@@ -25,6 +26,10 @@ class InboxStore:
     
     def _init_db(self):
         """Initialize the database with required tables and indexes."""
+        if self.db_path != ":memory:":
+            parent = os.path.dirname(self.db_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA journal_mode=WAL;")
         

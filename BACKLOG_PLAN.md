@@ -1,5 +1,9 @@
 # Parousia Phase 1 Backlog — Implementation Plan
 
+> **⚠️ IMPLEMENTED (2026-11-24):** All six tasks below are complete and on `main`.
+> Verification: DKIM 4/4, monitoring 4/4, approval-queue 10/10, MCP server 11 passed + 1 xfailed.
+> Related GitHub issues #1 and #2 closed. This document is retained for reference only.
+
 > **Goal:** Complete items 2–7 from the Phase 1 carry-forward backlog: postfwd Tier 2 rate
 > limiting, human-in-the-loop batch approval, multi-agent routing, DKIM inbound validation,
 > TLS certificates, and monitoring dashboard.
