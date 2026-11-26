@@ -1,8 +1,13 @@
 # What's Done
 
-Complete feature inventory by implementation order. 320 tests passing as of June 2026.
+Complete feature inventory by implementation order. 716 tests passing as of v0.5.0 (Nov 2026).
 
 ---
+---
+
+## v0.5.0 — 2026-11-26 (first claimed release)
+
+25 MCP tools — email 7 (`send_email`, `check_inbox`, `read_message`, `wait_for_email`, `mark_read`, `archive`, `delete`), temporal 6, spatial 6 (incl. `check_egress_ip`), TOTP 4, memory 2 (`mem0_search`, `mem0_profile`). Per-account auth with per-account rate limiting (20/hr default, 500/day domain). Fail-closed `serve` (REST loopback-only; MCP SSE opt-in). Proxy/Tor egress transports + browser fingerprint hardening. Mem0/Qdrant memory read side. DKIM key rotation (`setup --dkim --rotate`). Full documentation pass (getting-started, CLI reference, capability guides) reconciled against the code.
 
 ## Phase 1 — Email (Stories 1-9)
 

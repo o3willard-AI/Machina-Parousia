@@ -76,7 +76,7 @@ def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_r
             yaml.safe_dump(config_data, f, default_flow_style=False, sort_keys=False)
 
         click.secho(f"✓ Config written to {target}", fg="green")
-        click.echo(f"  Edit {target} to set your domain, agent webhooks, and rate limits.")
+        click.echo(f"  Edit {target} to set your domain and rate limits.")
         return
 
     if dkim:
@@ -336,7 +336,7 @@ def status():
 
 @cli.command()
 def ingest():
-    """Read raw email from stdin, parse, and forward to agent webhook."""
+    """Read raw email from stdin, parse, and forward to the REST ingest endpoint."""
     from parousia.guard.ingest import main as ingest_main
 
     ingest_main()

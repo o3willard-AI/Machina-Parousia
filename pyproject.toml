@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "parousia-guard"
-version = "0.2.0"
+version = "0.5.0"
 description = "Agentic Mail Server Guard — Postfix pipe-to-agent gateway with rate limiting and temporal presence"
 readme = "README.md"
 requires-python = ">=3.10"

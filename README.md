@@ -19,7 +19,7 @@ Parousia is a single self-hosted server that gives every agent under your domain
 
 All four share the same MCP server, the same config file, and the same deployment. Each is an independent capability — you can use email without spatial, temporal without email — but they're designed to interoperate (email triggers calendar events, browse sessions feed into memory).
 
-> **Version:** v0.2.0 · **Tests:** 716 passing · **License:** MIT
+> **Version:** v0.5.0 · **Tests:** 716 passing · **License:** MIT
 
 Every agent account is bound at onboarding to a named human sponsor, so Parousia records a declared **Registered Accountable Entity (RAE) at L0 (declared, unverified)** with actions attributable to that human rather than only to the agent — see the [RAE specification](https://github.com/o3willard-AI/RAE) and [docs/accountability.md](docs/accountability.md).
 

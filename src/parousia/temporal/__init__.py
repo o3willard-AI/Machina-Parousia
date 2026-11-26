@@ -5,4 +5,4 @@ temporal architecture with token-lean DSL, hybrid storage, MCP tools,
 ingest pipeline, and opportunistic context injection.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.5.0"
