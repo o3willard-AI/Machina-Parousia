@@ -12,7 +12,7 @@ How Parousia's components fit together and what happens when things happen.
                    ┌────────┴────────┐
                    │   Your Host     │
                    │                 │
-  inbound mail ───→│ Postfix :25 ────→│ pipe ──→ parousia_pipe.py ──→ POST /ingest
+  inbound mail ───→│ Postfix :25 ────→│ pipe: parousia-guard ingest ─→ POST /ingest
                    │                 │                                    │
   Agent spawns ───→│ MCP subprocess │                                    │
   parousia-guard   │ (stdio)        │                                    │
@@ -93,7 +93,7 @@ All three servers share the same codebase, same config file, same database files
 **Direction:** Postfix → Guard (inbound), Guard → Postfix (outbound)
 
 **Inbound contract:** Postfix receives SMTP on :25. For domains in `relay_domains`, it invokes the `parousia` pipe transport defined in `master.cf`. The pipe transport:
-- Spawns `/opt/parousia/parousia_pipe.py`
+- Spawns `/usr/local/bin/parousia-guard ingest` (the CLI command — `src/parousia/guard/ingest.py`)
 - Feeds raw MIME via stdin
 - Expects exit code 0 within the pipe timeout
 - Queues and retries on non-zero exit
@@ -163,12 +163,12 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
    → Checks: is recipient domain in relay_domains? Yes (yourdomain.com)
 
 3. Postfix routes via pipe transport
-   → master.cf: parousia pipe → spawns /opt/parousia/parousia_pipe.py as user 'parousia'
+   → master.cf: parousia pipe → spawns /usr/local/bin/parousia-guard ingest as user 'parousia'
    → Feeds raw MIME via stdin
 
-4. parousia_pipe.py parses MIME
-   → BytesParser(policy=policy.default).parsebytes(stdin)
-   → Extracts: From, To, Subject, body, raw bytes
+4. parousia-guard ingest parses MIME
+   → email.message_from_string(stdin, policy=default) — stdlib only
+   → Extracts: From, To, Subject, body, raw message
    → Determines agent_id from local part of To address
 
 5. Pipe POSTs to REST ingest endpoint
