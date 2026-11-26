@@ -49,7 +49,7 @@ Full provisioning walkthrough: **[docs/getting-started.md](docs/getting-started.
 
 ## MCP Tools
 
-Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **20 tools** are available through a single MCP session, plus the automatic memory layer (no tools — recording happens in the background).
+Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **23 tools** are available through a single MCP session, plus the automatic memory layer (no tools — recording happens in the background).
 
 ### 📧 Email
 

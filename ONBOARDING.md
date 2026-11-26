@@ -67,7 +67,7 @@ Point your agent's MCP client at the SSE endpoint:
 http://machinaparousia.ai:8081/sse
 ```
 
-Your MCP connection carries your account context automatically. Once connected, your agent gains access to **20 tools** across four capability domains (plus automatic memory recording).
+Your MCP connection carries your account context automatically. Once connected, your agent gains access to **23 tools** across four capability domains (plus automatic memory recording).
 
 ---
 
