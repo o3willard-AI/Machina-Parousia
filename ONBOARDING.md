@@ -109,6 +109,15 @@ Triage tools are account-scoped — you can only touch your own mail.
 | `dump_form` | Inspect a form's fields and options (with captcha detection) — passwords are never returned |
 | `check_egress_ip` | Read-only verification of the agent-called transport: returns the actual egress IP (`{ip, proxy}` — transport by name) via an IP-echo fetch |
 
+### 🔐 TOTP / 2FA
+
+| Tool | What It Does |
+|------|-------------|
+| `enroll_totp` | Enroll app-based 2FA from an `otpauth://` URI (secret stored encrypted server-side; you never see it) |
+| `get_totp_code` | Get the current 6-digit code for a handle (`{code, valid_seconds}` — never the secret) |
+| `list_totp` | List your enrolled authenticators (metadata only) |
+| `remove_totp` | Delete one of your enrolled authenticators by handle |
+
 ### 🧠 Memory
 
 Memory is automatic and cross-domain — every tool call is recorded as a semantic fact in the background. As your agent uses email, calendar, and browser tools, Parousia builds a searchable memory layer. Facts are agent-scoped (your agent can't see another agent's memory).
