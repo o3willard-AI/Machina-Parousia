@@ -89,6 +89,17 @@ Triage tools are **account-scoped**: they only ever touch messages stored for th
 
 Session cookies persist across calls (persistent per-agent Chromium profile). On a failed/refused `browse_to`/`interact`, the result carries **failure forensics** — a `block_vendor` classification (CloudFront/Cloudflare/Akamai), a screenshot path, and a DOM snapshot — so agents can tell "the tool is broken" from "the site is refusing us".
 
+### 🔐 TOTP / 2FA
+
+| Tool | Description |
+|------|-------------|
+| `enroll_totp` | Enroll a TOTP authenticator (RFC 6238) from the `otpauth://` URI a service emits when enabling app-based 2FA. The secret is stored server-side, encrypted; returns the enrollment summary (handle/issuer/account/algorithm/digits/period) — never the secret. |
+| `get_totp_code` | Compute the current TOTP code for an enrolled handle. Returns `{code, valid_seconds}` — never the secret. |
+| `list_totp` | List your enrolled TOTP authenticators (handles + metadata; never secrets). |
+| `remove_totp` | Delete one of your enrolled authenticators by handle (another agent's handle is refused). |
+
+Secrets are Fernet-encrypted at rest and account-scoped — an agent can only enroll/read/remove its own. 2FA codes and metadata are never written to the memory layer.
+
 ### 🧠 Memory (automatic)
 
 Every recorded tool call is written in the background as a natural-language fact to a local Qdrant vector DB (fastembed, CPU-only — no external API). Facts are **agent-scoped**: `parousia-{agent_id}`. There are no memory MCP tools — query your own facts or cross-agent facts via direct Qdrant (see [docs/capabilities/memory.md](docs/capabilities/memory.md)). Credential fills are never recorded.
@@ -174,6 +185,7 @@ Full component interactions and request lifecycle: **[docs/architecture.md](docs
 | [Temporal Guide](docs/capabilities/temporal.md) | All 6 temporal tools, DSL format reference, conflict resolution rules |
 | [Spatial Guide](docs/capabilities/spatial.md) | All 6 spatial tools, SDOM format reference, credential store, browser pool internals |
 | [Memory Guide](docs/capabilities/memory.md) | The automatic memory layer, fact formatters, circuit breaker, querying |
+| [TOTP Guide](docs/capabilities/totp.md) | The 4 TOTP/2FA tools, encrypted secret vault, account scoping |
 | [Architecture](docs/architecture.md) | Full system diagram, component contracts, life-of-an-email, life-of-an-MCP-call |
 | [Accountability (RAE)](docs/accountability.md) | The human sponsor behind every agent action; L0 (declared) assurance model and claim boundary |
 | [Hosting Notes](docs/hosting.md) | Provider-specific notes: AWS (SES, port 25), Hetzner, DigitalOcean, Linode |
