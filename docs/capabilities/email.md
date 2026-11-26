@@ -215,7 +215,7 @@ Triage your own messages by ID. Each is **account-scoped**: the message must be 
 ```
 Internet → Postfix :25
   → master.cf pipe transport
-  → /opt/parousia/parousia_pipe.py (stdin MIME parse)
+  → parousia-guard ingest (stdin MIME parse)
   → POST http://127.0.0.1:8080/ingest
   → InboxStore.insert() (SQLite)
   → "accepted" response (within 250ms)

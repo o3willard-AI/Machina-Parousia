@@ -147,6 +147,19 @@ GCP blocks outbound port 25 permanently on Compute Engine. You **must** use a th
 
 ---
 
+## Tier 2 rate limiting (postfwd)
+
+postfwd is a Postfix policy daemon — a second, SMTP-level rate-limiting layer **under** Parousia's application-level Redis token buckets (config `rate_limits`). Parousia ships a setup script:
+
+```bash
+parousia-guard setup --postfwd
+# → runs scripts/postfwd-setup.sh with sudo
+```
+
+Rules live in `config/postfwd/rules.cf` — per-domain/per-client SMTP limits, enforced before mail even enters Parousia. Edit the file, then restart postfwd.
+
+---
+
 ## Common provider checklist
 
 | Provider | Outbound 25 | PTR setup | Firewall notes |

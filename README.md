@@ -180,6 +180,7 @@ Full component interactions and request lifecycle: **[docs/architecture.md](docs
 | Doc | What it covers |
 |-----|---------------|
 | [Getting Started](docs/getting-started.md) | Full provisioning: host setup, DNS, Postfix, Redis, Qdrant, TLS, DKIM, verification |
+| [CLI Reference](docs/cli.md) | Every `parousia-guard` command and flag (verified against `--help`), plus the REST `/admin` endpoints and `PAROUSIA_ADMIN_KEY` |
 | [Onboarding](ONBOARDING.md) | How an agent (or its sponsor) creates an account and connects via MCP |
 | [Email Guide](docs/capabilities/email.md) | All 7 email tools with request/response examples |
 | [Temporal Guide](docs/capabilities/temporal.md) | All 6 temporal tools, DSL format reference, conflict resolution rules |

@@ -23,7 +23,7 @@ Cost: ~$30-55/month for the instance + $3-10/month for storage. Elastic IP is fr
 1. Navigate to **EC2 → Instances → Launch Instance**
 2. Name: `parousia-mx`
 3. AMI: **Ubuntu Server 24.04 LTS (HVM), SSD Volume Type** (64-bit x86)
-4. Instance type: **t3.small**
+4. Instance type: **t3.medium** (2 vCPU, 4 GB RAM) — or **m7i-flex.large** (2 vCPU, 8 GB) if running full spatial browsing with multiple Chromium instances (see the instance sizing table in [hosting.md](hosting.md#instance-sizing) and the spec table above)
 5. Key pair: Create new (RSA, .pem) or select existing. **Save the .pem file securely** — you'll need it for SSH.
 6. Network settings:
    - VPC: default (or your production VPC)
@@ -37,8 +37,11 @@ Cost: ~$30-55/month for the instance + $3-10/month for storage. Elastic IP is fr
    | SMTP | TCP | 25 | 0.0.0.0/0 | Inbound mail |
    | HTTP | TCP | 80 | 0.0.0.0/0 | Let's Encrypt (optional) |
    | HTTPS | TCP | 443 | 0.0.0.0/0 | Let's Encrypt (optional) |
+   | Custom TCP | TCP | 8080 | Your IP/32 | Parousia REST API (the server binds loopback — open this only if you proxy or tunnel into it) |
 
    > ⚠️ **Important**: The default security group blocks port 25 outbound. After launch, you must also enable outbound port 25 in the security group for Postfix to deliver mail.
+   >
+   > **MCP SSE (MP-13):** no `:8081` inbound rule is needed — the MCP SSE server binds loopback `127.0.0.1:8081` by default (`--mcp-host`). Open `8081` only if you explicitly expose it with `--mcp-host 0.0.0.0`.
 
 8. Storage: 20 GB gp3, **Delete on termination: Yes** (for dev/staging)
 9. Launch
@@ -68,10 +71,14 @@ aws ec2 authorize-security-group-ingress \
   --group-name parousia-mx-sg \
   --protocol tcp --port 443 --cidr 0.0.0.0/0
 
+aws ec2 authorize-security-group-ingress \
+  --group-name parousia-mx-sg \
+  --protocol tcp --port 8080 --cidr $(curl -s ifconfig.me)/32
+
 # Launch instance
 aws ec2 run-instances \
   --image-id ami-0c7217cdff26c3b6d \
-  --instance-type t3.small \
+  --instance-type t3.medium \
   --key-name your-key-pair \
   --security-groups parousia-mx-sg \
   --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":20,"VolumeType":"gp3"}}]' \
@@ -160,7 +167,7 @@ AWS blocks outbound port 25 on all new accounts by default. You have two paths:
 
 ### Option B: Use SES as smarthost relay (faster approval, ~hours)
 
-Route outbound mail through Amazon SES on port 587 (always open on EC2). Full SES walkthrough is in [hosting.md](hosting.md#amazon-ses). In brief:
+Route outbound mail through Amazon SES on port 587 (always open on EC2). Full SES walkthrough is in [hosting.md → AWS → Option B](hosting.md#option-b-use-ses-as-smarthost-relay-hours). In brief:
 
 1. Verify your domain in SES console
 2. Add 3 DKIM CNAME records to your DNS
@@ -196,25 +203,35 @@ sudo systemctl start redis-server
 ## Step 6: Clone and Install parousia-guard
 
 ```bash
+# System user the Postfix pipe and the service run as
+sudo useradd -r -s /bin/false parousia
+
 # Clone the repo
-git clone https://github.com/o3willard-AI/Parousia.git /opt/parousia
+git clone https://github.com/o3willard-AI/Machina-Parousia.git /opt/parousia
 cd /opt/parousia
 
-# Install with pip
-sudo pip install --break-system-packages -e .
+# Venv install — the same flow as getting-started.md, never a system-wide pip
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+# Expose the console script at the absolute path the Postfix pipe/alias
+# expect (setup --postfix writes: agent-alias: "|/usr/local/bin/parousia-guard ingest")
+sudo ln -sf /opt/parousia/.venv/bin/parousia-guard /usr/local/bin/parousia-guard
 
 # Generate config
-sudo parousia-guard setup --config
+sudo /opt/parousia/.venv/bin/parousia-guard setup --config
 
-# Setup Postfix aliases
-sudo parousia-guard setup --postfix
+# Setup Postfix aliases (pipe-to-agent delivery)
+sudo /opt/parousia/.venv/bin/parousia-guard setup --postfix
 
 # Generate DKIM keys and get DNS records
-parousia-guard setup --dkim
+sudo /opt/parousia/.venv/bin/parousia-guard setup --dkim
 # → Copy the output to your DNS provider (Hostinger, Cloudflare, etc.)
+# Rotate existing keys (timestamp-suffixed new key, old key kept):
+#   parousia-guard setup --dkim --rotate
 
 # Validate installation
-parousia-guard validate
+/opt/parousia/.venv/bin/parousia-guard validate
 ```
 
 ## Step 7: DNS Configuration (Hostinger or Cloudflare)

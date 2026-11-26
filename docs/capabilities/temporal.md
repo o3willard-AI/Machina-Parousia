@@ -2,7 +2,7 @@
 
 Parousia gives every agent a calendar, a journal, and scheduling intelligence. The temporal engine builds on Phase 1's email — events can come from .ics email attachments or be created directly by agents.
 
-All temporal data is stored in SQLite at `/var/lib/parousia/temporal.db` (configurable), scoped per-agent via `agent_id`.
+All temporal data is stored in SQLite at `/var/lib/parousia/temporal.db` — a **fixed path**: the MCP server opens `TemporalDB()` with no argument, so it is *not* configurable (only the account, credential, and TOTP stores are config-driven: `account_store.db_path`, `credential_store.db_path`/`key_path`, `totp_store.db_path`/`key_path`). Data is scoped per-agent via `agent_id`.
 
 ---
 
@@ -55,7 +55,7 @@ Returns the agent's calendar in a token-lean DSL format. Designed for LLM contex
 | Journal entry | `MM-DD [jN] *type* description` | `06-10 [j2] *decision* Use SES for outbound` |
 | Timer | `MM-DD HH:MM\|HH:MM [id:XN] title ⏰` | `06-11 14:45\|14:45 [id:t1] Review reminder ⏰` |
 
-Event IDs are short (`e3`, `j2`) — use them as-is with `cancel_event` and `interact` tools.
+Event IDs are short (`e3`, `j2`) — use them as-is with the `cancel_event` tool.
 
 ---
 
@@ -279,7 +279,7 @@ Every `schedule_event` call also generates export payloads in three formats:
 - **Google Calendar API JSON** — for programmatic Google Calendar integration
 - **Microsoft Graph API JSON** — for Outlook/Exchange integration
 
-These are attached to the response as `exports.ics`, `exports.google`, and `exports.ms_graph`. Use them to sync agent calendars to external systems.
+These are attached to the response as `exports.ics`, `exports.google`, and `exports.msgraph`. Use them to sync agent calendars to external systems.
 
 ---
 
@@ -289,6 +289,6 @@ When an email arrives with a `.ics` attachment (meeting invite), the temporal in
 1. Parses the `.ics` file
 2. Extracts event details (title, time, attendees, recurrence)
 3. Creates a tentative event in the agent's temporal DB
-4. Tags it with `source: ics-email`
+4. Tags it with `source: ics_import`
 
 The agent sees these in `get_temporal_context` with the source annotation. No manual event creation needed for calendar invites.

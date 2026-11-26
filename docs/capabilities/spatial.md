@@ -7,7 +7,7 @@ Parousia gives every agent a persistent web browser. Agents navigate, interact, 
 ## Architecture
 
 ```
-Agent → MCP browse_to/interact/extract_page_state (stdio transport)
+Agent → MCP browse_to/interact/extract_page_state/check_egress_ip (stdio transport)
   → SpatialToolHandlers.dispatch()
   → BrowserPoolManager.get_browser(agent_id)
   → Playwright Chromium (per-agent persistent profile)
@@ -32,6 +32,8 @@ Navigate to a URL and return the page as SDOM.
 | `url` | ✅ | URL to navigate to |
 | `timeout_ms` | ❌ | Navigation timeout in ms (default: 30000) |
 | `extract_mode` | ❌ | `standard` (default), `content_only`, or `interactive_only` |
+| `proxy` | ❌ | Named transport for **this** request — a name from the operator's `spatial.proxies` menu. `""`/omitted = **direct egress, always** (see [Egress transports](#egress-transports-tor-and-stealth)) |
+| `user_agent` | ❌ | Per-navigation User-Agent override (consistent Sec-CH-UA client hints applied). Default: the configured browser identity |
 
 **Extraction modes:**
 
@@ -117,6 +119,7 @@ Perform actions on SDOM elements using their IDs (from `browse_to` or `extract_p
 | `value` | ❌ | Value to select (required for `select` action) |
 | `key` | ❌ | Key to press (required for `press` action) |
 | `timeout_ms` | ❌ | Timeout in ms (default: 30000) |
+| `proxy` | ❌ | Named transport for **this** request (same semantics as `browse_to`'s `proxy`, with one nuance: `""`/omitted = the agent's **default context** — direct egress unless the operator mapped a proxy for that agent; see [Egress transports](#egress-transports-tor-and-stealth)) |
 
 **Action reference:**
 
@@ -205,7 +208,10 @@ Fill a stored credential into a login form on the **current page's origin**. Cre
 
 | Param | Required | Description |
 |-------|----------|-------------|
+| `origin` | ✅ | Origin the credential is stored for (e.g. `https://site.example`) — must match the current page origin |
 | `handle` | ✅ | The credential handle (as stored by the human) |
+| `submit` | ❌ | Also click a submit button after filling (default: `false`) |
+| `timeout_ms` | ❌ | Timeout in ms for field lookups (default: 30000) |
 
 **Response:**
 ```json
@@ -233,6 +239,66 @@ Introspect the current page's form controls so an agent knows exactly what to fi
   "captcha": {"present": true, "vendor": "cloudflare", "type": "turnstile", "sitekey": "0x4AAA..."}
 }
 ```
+
+---
+
+### `check_egress_ip`
+
+Read-only verification of the agent-called transport — the 6th spatial tool. Navigates to an IP-echo endpoint (`https://api.ipify.org`) and returns the **actual public IP** the request presented, so an agent can confirm a chosen transport (e.g. `proxy="tor"`) is genuinely active before attempting a signup.
+
+**Parameters:**
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `proxy` | ❌ | Named transport to verify — same semantics as `browse_to`'s `proxy` (`""`/omitted = direct egress) |
+| `timeout_ms` | ❌ | Echo navigation timeout in ms (default: 30000) |
+
+**Request:**
+```json
+{
+  "tool": "check_egress_ip",
+  "arguments": { "proxy": "residential-1" }
+}
+```
+
+**Response:**
+```json
+{ "ip": "203.0.113.7", "proxy": "residential-1" }
+```
+
+`proxy` is the transport **by name**, never the resolved URL (registry URLs may embed credentials). Read-only: nothing is submitted, nothing is stored — the echo fetch is the only traffic.
+
+---
+
+## Egress transports, Tor, and stealth
+
+Browser transport selection is **opt-in, agent-called, per request** — never a routing rule.
+
+- `proxy` omitted or `""` → **direct egress** (`browse_to`) / the agent's default context (`interact`) — the default, always
+- a name from the operator's `spatial.proxies` menu → that named proxy, in its own persistent context per (agent, proxy)
+- an unknown name → loud error listing the available transports
+- `tor` → the **reserved, managed Tor transport**. Requires `spatial.tor_enabled: true` — while disabled (the default) or unavailable, the call **fails loud**, never a silent direct-egress fallback. The SOCKS listener binds loopback only (`spatial.tor_socks_port`, default 9050), and Tor is never auto-started: an explicit `proxy="tor"` with `tor_enabled=true` is the only path that launches it.
+
+`browse_to` additionally accepts a per-navigation **`user_agent`** override; the configured browser identity (`spatial.user_agent`) is the default.
+
+**Operator config (`config.yaml` `spatial:` block):**
+
+```yaml
+spatial:
+  proxies:                       # MENU of named transports (name → proxy URL),
+    residential-1: "http://user:pass@proxy.example:8080"   # never a routing rule
+    datacenter: "socks5://proxy.example:1080"
+  proxy_servers:                 # operator-side per-agent mapping (agent_id → URL)
+    hermes: "http://user:pass@proxy.example:8080"
+  proxy_default: ""              # default proxy for mapped agents ("" = direct)
+  tor_enabled: false              # opt-in; `proxy="tor"` fails loud while false
+  tor_socks_port: 9050
+  stealth_enabled: false          # full fingerprint hardening — OFF by default
+```
+
+Results and egress reports always carry the transport **name**, never the resolved URL.
+
+**Stealth (MP-9):** `spatial.stealth_enabled` (default **off**) switches the pool from the plain `navigator.webdriver` suppression script to a full stealth init script — `navigator.webdriver` → `undefined`, `window.chrome` realism, plugins/languages/platform realism, WebGL vendor/renderer, `history.length`. Ordinary browsing is exactly as today while off; when on, the stealth script **replaces** the plain suppression script (they are never stacked).
 
 ---
 
@@ -285,6 +351,11 @@ spatial:
     - "--disable-dev-shm-usage"
     - "--disable-gpu"
     - "--headless=new"
+  # Identity & egress (see "Egress transports, Tor, and stealth" above):
+  # user_agent: "…"        # per-agent browser identity (default: current desktop Chrome UA)
+  # proxies: {}            # named transport menu — agent calls one by name via `proxy`
+  # tor_enabled: false     # reserved `tor` transport, opt-in
+  # stealth_enabled: false # full fingerprint hardening, OFF by default
 ```
 
 ---

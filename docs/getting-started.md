@@ -10,7 +10,8 @@ This guide covers provisioning a host for Parousia from scratch. It's **provider
 - A **host with a publicly routable static IP address** (VPS, dedicated server, EC2, etc.)
 - **Root/sudo access** to the host
 - Ability to open **inbound ports**: 25 (SMTP), 80 (HTTP), 443 (HTTPS), 8080 (REST)
-- MCP transport is **stdio** — agents spawn the MCP server as a subprocess over SSH or local execution. No network port needed for MCP.
+- **Qdrant** on `127.0.0.1:6333` for the memory layer (install step below)
+- MCP transports: **stdio** by default — agents spawn `parousia-guard serve --mcp` as a subprocess, no network port needed. An optional **SSE** transport exists on `:8081` (`serve --mcp-sse` / `serve --all`); it must be requested explicitly and binds loopback `127.0.0.1` by default (pass `--mcp-host 0.0.0.0` explicitly to expose it) — see [MP-13 fail-closed serve defaults](architecture.md#transport-model).
 
 ---
 
@@ -144,6 +145,31 @@ systemctl enable --now redis-server   # Ubuntu/Debian
 # systemctl enable --now redis        # RHEL/Fedora
 ```
 
+### Install and start Qdrant (memory engine)
+
+Parousia's memory layer stores recorded tool facts as vectors in **Qdrant on `127.0.0.1:6333`** (collection `mem0`, fastembed local-ONNX embeddings — no external API, no GPU). Docker or a native binary both work:
+
+```bash
+# Docker (simplest)
+docker run -d --name qdrant --restart unless-stopped \
+  -p 127.0.0.1:6333:6333 \
+  -v /var/lib/qdrant:/qdrant/storage qdrant/qdrant
+
+# or native: download the static binary from the Qdrant releases page
+# (github.com/qdrant/qdrant/releases — listens on :6333 by default) and run
+# it under systemd
+```
+
+Verify:
+
+```bash
+systemctl status qdrant            # native installs
+curl http://localhost:6333/healthz
+# → ok
+```
+
+`/etc/parousia/mem0.yaml` is **optional** — the memory engine has sane defaults (Qdrant on `127.0.0.1:6333`, local fastembed embedder, `infer: false` — no LLM is contacted). See [docs/capabilities/memory.md](capabilities/memory.md) for the full schema.
+
 ---
 
 ## Step 4: Configure Postfix
@@ -184,9 +210,11 @@ postconf -e "relay_transport = parousia"
 Add the pipe service to `/etc/postfix/master.cf`:
 ```bash
 cat >> /etc/postfix/master.cf << 'EOF'
-parousia  unix  -  n  n  -  -  pipe  flags=R user=parousia argv=/opt/parousia/parousia_pipe.py
+parousia  unix  -  n  n  -  -  pipe  flags=R user=parousia argv=/usr/local/bin/parousia-guard ingest
 EOF
 ```
+
+The pipe invokes the CLI command **`parousia-guard ingest`** — there is no separate pipe script to write (see Step 5b).
 
 Create the `parousia` system user:
 ```bash
@@ -232,54 +260,33 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 5b. Create the pipe script
+### 5b. The pipe command — `parousia-guard ingest`
 
-Postfix's pipe transport will invoke this script for every inbound email:
+There is **no pipe script to write**. The pipe is the CLI command **`parousia-guard ingest`** (`src/parousia/guard/ingest.py`) — the same command the `master.cf` entry (Step 4b) and the `/etc/aliases` entry (Step 5d) invoke. Postfix hands it the raw RFC 822 message on **stdin**, and it:
+
+- parses the MIME with the **stdlib `email` module** (no third-party dependencies — nothing beyond the venv install),
+- **derives `agent_id` from the local part of the recipient** (`hermes@yourdomain.com` → `hermes`),
+- POSTs to `http://127.0.0.1:8080/ingest` via stdlib `urllib` (never `requests`).
+
+`ingest` takes **no flags** — no `--config`, no `--db`; it resolves everything (agent identity, REST endpoint) from the message itself. Exit codes: `0` on success (and on empty stdin — nothing to bounce), `75` (EX_TEMPFAIL) on parse failure or an unreachable REST server — Postfix queues and retries on non-zero.
+
+The canonical `/ingest` JSON payload — `agent_id` is **required, no default**; a payload without it is rejected with 422 before it ever reaches the inbox:
+
+```json
+{
+  "sender": "someone@example.org",
+  "recipient": "hermes@yourdomain.com",
+  "subject": "Quarterly report",
+  "body": "See attached.",
+  "agent_id": "hermes",
+  "raw_mime": "Received: from mail.example.org ...\r\n"
+}
+```
+
+Postfix invokes the **absolute path** `/usr/local/bin/parousia-guard` (both in `master.cf` and in the alias `setup --postfix` writes), so expose the venv console script there after installing:
+
 ```bash
-cat > /opt/parousia/parousia_pipe.py << 'PYEOF'
-#!/opt/parousia/.venv/bin/python3
-"""Postfix pipe handler — parses MIME from stdin and POSTs to REST ingest."""
-import sys, json, requests
-from email.parser import BytesParser
-from email import policy
-
-def main():
-    raw = sys.stdin.buffer.read()
-    msg = BytesParser(policy=policy.default).parsebytes(raw)
-
-    sender = msg.get('From', '')
-    recipient = msg.get('To', '')
-    subject = msg.get('Subject', '')
-
-    body = ''
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == 'text/plain':
-                body = part.get_content()
-                break
-    else:
-        body = msg.get_content()
-
-    payload = {
-        'sender': sender,
-        'recipient': recipient,
-        'subject': subject,
-        'body': str(body)[:65536],
-        'raw_mime': raw.decode('utf-8', errors='replace')[:262144],
-    }
-
-    try:
-        r = requests.post('http://127.0.0.1:8080/ingest', json=payload, timeout=10)
-        print(f'Ingest: {r.status_code}')
-    except Exception as e:
-        print(f'Ingest error: {e}', file=sys.stderr)
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()
-PYEOF
-
-chmod +x /opt/parousia/parousia_pipe.py
+sudo ln -sf /opt/parousia/.venv/bin/parousia-guard /usr/local/bin/parousia-guard
 ```
 
 ### 5c. Generate config
@@ -288,15 +295,40 @@ chmod +x /opt/parousia/parousia_pipe.py
 parousia-guard setup --config
 ```
 
-Edit `/etc/parousia/config.yaml`:
+Edit `/etc/parousia/config.yaml` — set your **domain and rate limits** (this mirrors what `setup --config` writes; there is no webhook configuration):
+
 ```yaml
 domain: yourdomain.com
+hostname: mail.yourdomain.com
 
+redis:
+  host: localhost
+  port: 6379
+  db: 0
+
+rate_limits:
+  per_agent_per_hour: 100
+  domain_per_day: 500
+
+postfix:
+  aliases_file: /etc/aliases
+  guard_script: /usr/local/bin/parousia-guard
+
+dkim:
+  key_dir: /etc/parousia/dkim
+  selector: default
+
+# MP-13: there are no rest_host/rest_port keys — REST is deliberately
+# internal and hardcoded to loopback 127.0.0.1:8080 in `serve`.
+# mcp_host also defaults to loopback (fail-closed).
 server:
-  rest_host: "127.0.0.1"
-  rest_port: 8080
-  mcp_host: "0.0.0.0"
-  mcp_port: 8081       # stdio transport only — no network port needed
+  mcp_host: "127.0.0.1"
+  mcp_port: 8081
+
+logging:
+  level: info
+  format: json
+  output: syslog
 
 # Agents are onboarded into accounts.db (no `agents:` block) — see ONBOARDING.md
 
@@ -306,13 +338,21 @@ spatial:
   max_instances: 6
 ```
 
+> **Upgrading from a pre-MP-7 install?** If your `config.yaml` still carries a legacy `agents:` block, run `parousia-guard migrate-agents` once or your roster is **dropped silently** — the pydantic config ignores the extra key, so config-only agents vanish from the registry. The command is idempotent (`--db` overrides the account-store path, `--config` points at the legacy YAML); it creates accounts.db rows with **no API key** (those agents authenticate via ingest/stdio) and refreshes rate limits/status without touching keys, tier, or email. After it succeeds, delete the `agents:` block from the config file.
+
 ### 5d. Set up Postfix aliases
 
 ```bash
 parousia-guard setup --postfix
 ```
 
-This adds agent entries to `/etc/aliases` so mail to `hermes@yourdomain.com` is piped to the guard script.
+This appends the pipe alias to `/etc/aliases` (and runs `newaliases`), so inbound agent mail is piped to the same command as the `master.cf` entry:
+
+```
+agent-alias: "|/usr/local/bin/parousia-guard ingest"
+```
+
+Restart Postfix to apply.
 
 ### 5e. Install Playwright + Chromium
 
@@ -326,8 +366,11 @@ playwright install-deps chromium
 ### 5f. Create directories
 
 ```bash
-mkdir -p /var/lib/parousia/{browsers,temporal,dkim}
-chown -R parousia:parousia /var/lib/parousia
+# Browser profiles and temporal DB live under /var/lib/parousia.
+# DKIM keys live at the configured dkim.key_dir — /etc/parousia/dkim
+# (the config.yaml default — NOT under /var/lib).
+mkdir -p /var/lib/parousia/{browsers,temporal} /etc/parousia/dkim
+chown -R parousia:parousia /var/lib/parousia /etc/parousia/dkim
 ```
 
 ---
@@ -360,6 +403,19 @@ EOF
 systemctl daemon-reload
 systemctl enable --now parousia-guard
 ```
+
+> **What `serve` starts (MP-13):** a bare `serve` starts the **REST ingress only**, hardcoded to loopback `127.0.0.1:8080` — that is what this unit runs. MCP over stdio needs no server at all (each agent spawns `parousia-guard serve --mcp` per session). To also run the MCP SSE endpoint, change `ExecStart` to `serve --all` (REST + MCP SSE) or `serve --mcp-sse` (SSE only) — `--mcp-host` defaults to `127.0.0.1`, so pass `0.0.0.0` explicitly if remote agents must reach it.
+
+### 6b. Create your first invite (onboarding is gated)
+
+`invites.require_invite` is `true` by default, so a fresh host can onboard **nobody** until an invite exists. Create one per agent you want to bring on:
+
+```bash
+parousia-guard invite create --sponsor stephen
+# → one-time invite key (also: --contact, --note, --max-uses, --expires-in-days)
+```
+
+See [ONBOARDING.md](../ONBOARDING.md) for the onboarding flow that consumes the key.
 
 Verify:
 ```bash
@@ -454,7 +510,7 @@ postmap hash:/etc/postfix/sasl_passwd
 systemctl restart postfix@-
 ```
 
-Full SES setup (domain verification, production access, SPF update): see [docs/hosting.md](hosting.md#amazon-ses).
+Full SES setup (domain verification, production access, SPF update): see [docs/hosting.md → AWS → Option B](hosting.md#option-b-use-ses-as-smarthost-relay-hours).
 
 ---
 
@@ -500,7 +556,7 @@ curl http://127.0.0.1:8080/health
 
 - Read the [capability guides](capabilities/) for each tool with usage examples
 - Read the [architecture doc](architecture.md) to understand component interactions
-- Set up [postfwd](hosting.md#postfwd) for additional SMTP-level rate limiting
+- Set up [postfwd — Tier 2 SMTP rate limiting](hosting.md#tier-2-rate-limiting-postfwd) for additional SMTP-level rate limiting
 - Configure [the human-in-the-loop approval queue](capabilities/email.md#approval-queue)
 
 ---
@@ -513,6 +569,6 @@ curl http://127.0.0.1:8080/health
 | Postfix shows `active (exited)` | Ubuntu 24.04: you started `postfix.service` (dummy). Use `postfix@-.service`. |
 | Inbound mail bounces (550) | `mydestination` includes `$mydomain`. Remove it — pipe transport needs domain in `relay_domains`. |
 | Outbound mail stuck in queue | `mailq`. Outbound port 25 blocked by provider. Use SES smarthost relay. |
-| `parousia_pipe.py` import error | The pipe runs as user `parousia`. Use `from email.parser import BytesParser` not `email.parser`. |
+| `parousia-guard ingest` pipe errors | The pipe runs as user `parousia` via `/usr/local/bin/parousia-guard`. Confirm the symlink to the venv bin exists (Step 5b) and `sudo -u parousia parousia-guard --version` works. Exit 75 = tempfail — Postfix queues and retries. |
 | SMTP test hangs | Test with Python `smtplib`, not `nc`/`telnet`. SMTP requires `\r\n` line endings. |
 | Gmail rejects mail | Missing PTR record. Set reverse DNS for your IP. Also check SPF and DKIM. |
