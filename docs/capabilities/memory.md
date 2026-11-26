@@ -1,6 +1,6 @@
 # Memory — Capability Guide
 
-Parousia's 4th presence domain. Write-side tool calls — sending email, scheduling events, browsing web pages — are automatically recorded as natural-language facts and stored in a vector database. Agents can search across their own history and discover facts from other agents, giving the Machine a persistent, searchable memory of everything it has done.
+Parousia's 4th presence domain. Write-side tool calls — sending email, scheduling events, browsing web pages — are automatically recorded as natural-language facts and stored in a vector database. The **read side** (MP-11) exposes two MCP tools — `mem0_search` and `mem0_profile` — so an agent can semantically recall **its own** recorded facts: a persistent, searchable memory of everything it has done.
 
 All facts are stored in Qdrant on the Parousia host (port 6333). Embeddings use fastembed (BAAI/bge-small-en-v1.5, 384-dim) — no external API calls, no GPU required. Writes are fire-and-forget on a daemon thread and return in <1ms; they never block tool calls.
 
@@ -38,6 +38,20 @@ Agent calls tool → handle_call_tool() dispatches → returns result to agent
 ```
 
 Each agent's facts are namespaced under `parousia-{agent_id}`. Read-only tools (`get_temporal_context`, `extract_page_state`) are skipped — only write-side actions are recorded. Failed tool calls are also skipped, so memory only contains successful actions.
+
+---
+
+## Read tools (MP-11)
+
+| Tool | What it does | Scope |
+|------|--------------|-------|
+| `mem0_search(query, top_k=5)` | Semantic recall across the agent's recorded facts → `{results: [{memory, score}], count}` | **Account-scoped by construction**: no `user_id` argument exists — the mem0 user_id is derived only from the authenticated account |
+| `mem0_profile()` | The agent's full recorded fact list (the "what have I done" dump) → `{facts: [{memory, created_at?}], count}` | Same — derived scope, never from input |
+
+- Wraps `Memory.search(query, filters={"user_id": ...}, top_k=...)` / `Memory.get_all(filters={"user_id": ...})` (mem0ai 2.2.1 signatures — filters carry the scope; both return `{"results": [...]}`).
+- The `MemoryQuery` client **shares the recorder's lazy `mem0.Memory` singleton** — one embedder/Qdrant client for the whole server (reads and writes).
+- **Fail soft**: reads respect the recorder's circuit breaker (backend known down → clean error), and Qdrant/mem0 read errors surface as clean tool errors — never a 500 that leaks the stack. Empty memory → `{results: [], count: 0}`.
+- **Memory reads are never themselves recorded** — no re-entrant `record_tool_call` from the read path.
 
 ---
 

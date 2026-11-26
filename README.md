@@ -49,7 +49,7 @@ Full provisioning walkthrough: **[docs/getting-started.md](docs/getting-started.
 
 ## MCP Tools
 
-Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **23 tools** are available through a single MCP session, plus the automatic memory layer (no tools — recording happens in the background).
+Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **25 tools** are available through a single MCP session, including the memory read tools (`mem0_search` / `mem0_profile` — recall your own recorded facts; recording itself still happens in the background).
 
 ### 📧 Email
 
@@ -102,7 +102,7 @@ Secrets are Fernet-encrypted at rest and account-scoped — an agent can only en
 
 ### 🧠 Memory (automatic)
 
-Every recorded tool call is written in the background as a natural-language fact to a local Qdrant vector DB (fastembed, CPU-only — no external API). Facts are **agent-scoped**: `parousia-{agent_id}`. There are no memory MCP tools — query your own facts or cross-agent facts via direct Qdrant (see [docs/capabilities/memory.md](docs/capabilities/memory.md)). Credential fills are never recorded.
+Every recorded tool call is written in the background as a natural-language fact to a local Qdrant vector DB (fastembed, CPU-only — no external API). Facts are **agent-scoped**: `parousia-{agent_id}`. Read your own facts back with `mem0_search` (semantic recall) and `mem0_profile` (the full "what have I done" dump) — account-scoped by construction: the mem0 user_id is derived from the authenticated account, never from tool arguments, so an agent sees only its own memory. Memory reads are never themselves recorded. Credential fills are never recorded.
 
 ### Authentication
 
