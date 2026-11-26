@@ -37,7 +37,7 @@ Agent calls tool → handle_call_tool() dispatches → returns result to agent
               (vector search)           (audit log)
 ```
 
-Each agent's facts are namespaced under `parousia-{agent_id}`. Read-only tools (`get_temporal_context`, `extract_page_state`) are skipped — only write-side actions are recorded. Failed tool calls are also skipped, so memory only contains successful actions.
+Each agent's facts are namespaced under `parousia-{agent_id}`. Read-only tools (`get_temporal_context`, `extract_page_state`) are skipped — their formatters return None. A **failed** `send_email` **is** recorded (as a failure fact — see the table below); `browse_to`/`interact` errors are skipped by their formatters, and `check_inbox` is skipped when it finds nothing unread. Memory holds actions and their outcomes, not only successes.
 
 ---
 
@@ -91,13 +91,15 @@ Every tool has a dedicated formatter that converts the tool call into a single n
 | `interact` (failed) | ❌ Skipped | — |
 | `extract_page_state` | ❌ Skipped | Read-only extraction |
 
-> **Total:** 9 tools produce facts. 3 are read-only skips. 4 skip on empty results or errors.
+> **Total:** **11** registered formatters (`@_register` in `src/parousia/memory/recorder.py`). **6** produce facts unconditionally (`send_email` — success, queued, and failure variants — `schedule_event`, `cancel_event`, `set_timer_alarm`, `nominate_milestone`, `resolve_conflicts`). **2** always return None (`get_temporal_context`, `extract_page_state` — read-only). **3** return None conditionally (`check_inbox` when no unread messages; `browse_to`/`interact` on error).
 
 ---
 
 ### Querying memory
 
-There is **no memory MCP query tool** — memory recording is automatic and write-only. To read facts back, query Qdrant directly (below). This is a deliberate scope boundary: the recording path is fire-and-forget and must never block tool calls, and the read path is a direct Qdrant query rather than an MCP surface.
+**Your own facts:** use the MCP read tools above (`mem0_search` for semantic recall, `mem0_profile` for the full dump) — both are account-scoped to you by construction.
+
+**Cross-agent facts:** the MCP read tools deliberately will NOT surface another agent's memory (account scoping is the security boundary). Direct Qdrant access (below) is the escape hatch for hosts, auditors, and cross-agent discovery — the operator path, not the agent path.
 
 ### Cross-agent search (direct Qdrant)
 

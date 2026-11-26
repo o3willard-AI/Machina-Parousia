@@ -19,7 +19,7 @@ Parousia is a single self-hosted server that gives every agent under your domain
 
 All four share the same MCP server, the same config file, and the same deployment. Each is an independent capability — you can use email without spatial, temporal without email — but they're designed to interoperate (email triggers calendar events, browse sessions feed into memory).
 
-> **Version:** v0.2.0 · **Tests:** 596 passing · **License:** MIT
+> **Version:** v0.2.0 · **Tests:** 716 passing · **License:** MIT
 
 Every agent account is bound at onboarding to a named human sponsor, so Parousia records a declared **Registered Accountable Entity (RAE) at L0 (declared, unverified)** with actions attributable to that human rather than only to the agent — see the [RAE specification](https://github.com/o3willard-AI/RAE) and [docs/accountability.md](docs/accountability.md).
 
@@ -55,9 +55,9 @@ Agents connect to Parousia via MCP stdio transport — each agent spawns `parous
 
 | Tool | Description |
 |------|-------------|
-| `send_email` | Send email through Parousia. Rate-limited: 100/hr per agent, 500/day domain-wide. |
-| `check_inbox` | List your inbox. Returns sender, subject, body, received time. Supports `unread_only`, `include_archived` (default `false` — archived mail is excluded), and `limit`. |
-| `read_message` | Read one message by ID (marks it read). |
+| `send_email` | Send email through Parousia. Rate-limited: 20/hr per account (enforced via the account's `rate_limit_per_hour`, default 20; the config `per_agent_per_hour` 100 is only the fallback when no account row exists), 500/day domain-wide. |
+| `check_inbox` | List your inbox. Returns sender, subject, `body_preview` (first 200 chars), received time, read/archived flags. Supports `unread_only`, `include_archived` (default `false` — archived mail is excluded), and `limit` (default 10). |
+| `read_message` | Read one full message by ID (returns the complete body). Does **not** mark it read — reading is side-effect-free; use `mark_read` to change read state. |
 | `wait_for_email` | Poll your inbox for a message matching a subject/sender substring (within a timeout). Returns the message plus its body links — e.g. to `browse_to` a confirmation URL (double opt-in). |
 | `mark_read` | Mark one of your messages read by ID (or bulk via `message_ids`). |
 | `archive` | Archive one of your messages by ID (or bulk via `message_ids`). |
