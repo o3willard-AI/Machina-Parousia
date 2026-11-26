@@ -16,6 +16,10 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+# MP-10b: the managed Tor transport (reserved name "tor"). Imported at
+# module level — no circularity (tor.py imports nothing from parousia).
+from .tor import TorManager
+
 @dataclass
 class SpatialConfig:
     chromium_path: str = "/usr/bin/chromium-browser"
@@ -42,6 +46,10 @@ class SpatialConfig:
     # available transports (never a routing rule). Kept in sync with
     # parousia.config.SpatialConfig (the canonical pydantic config).
     proxies: dict = field(default_factory=dict)
+    # MP-10b: managed Tor transport (reserved name "tor"). Kept in sync
+    # with parousia.config.SpatialConfig; see the comment there.
+    tor_enabled: bool = False
+    tor_socks_port: int = 9050
     # MP-9: full fingerprint hardening — opt-in, OFF by default. Kept in
     # sync with parousia.config.SpatialConfig (the canonical pydantic
     # config); see the comment there.
@@ -238,10 +246,24 @@ class BrowserPoolManager:
         self.config = config
         self._browsers = {}  # agent_id -> BrowserInstance
         self._lock_files = {}  # agent_id -> lock file path
+        # MP-10b: lazily-constructed TorManager (the tor subprocess
+        # lifecycle matches the pool's — see tor_manager()/shutdown_all).
+        self._tor_manager: Optional[TorManager] = None
 
         # Register shutdown handler. `shutdown_all` is async, so register a
         # sync trampoline that drives it with asyncio.run() at exit.
         atexit.register(self._atexit_shutdown)
+
+    def tor_manager(self) -> TorManager:
+        """MP-10b: the pool-owned `TorManager` (lazy).
+
+        The tor subprocess is created ONLY here — and this is reached
+        ONLY via an explicit, enabled ``proxy="tor"`` request (see
+        tools.SpatialToolHandlers._resolve_proxy). Never auto-started.
+        """
+        if self._tor_manager is None:
+            self._tor_manager = TorManager(self.config)
+        return self._tor_manager
 
     def _atexit_shutdown(self):
         """Best-effort sync trampoline for the async `shutdown_all`."""
@@ -551,6 +573,11 @@ class BrowserPoolManager:
             except Exception:
                 pass
         self._lock_files.clear()
+
+        # MP-10b: pool teardown stops the managed tor subprocess (same
+        # lifecycle as the browsers — atexit rides on shutdown_all).
+        if self._tor_manager is not None:
+            self._tor_manager.stop()
 
     def status(self) -> dict:
         """Get status information about all browsers."""
