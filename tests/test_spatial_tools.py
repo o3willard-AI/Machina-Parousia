@@ -60,13 +60,15 @@ class TestSpatialTools(unittest.TestCase):
     def test_all_spatial_schemas(self):
         """Test that ALL_SPATIAL_SCHEMAS contains correct schemas."""
         # MP-4: dump_form is the 5th spatial tool (was 4 after MP-3).
-        self.assertEqual(len(ALL_SPATIAL_SCHEMAS), 5)
+        # MP-10c: check_egress_ip is the 6th (read-only egress verification).
+        self.assertEqual(len(ALL_SPATIAL_SCHEMAS), 6)
         names = [schema["name"] for schema in ALL_SPATIAL_SCHEMAS]
         self.assertIn("browse_to", names)
         self.assertIn("interact", names)
         self.assertIn("extract_page_state", names)
         self.assertIn("fill_credentials", names)
         self.assertIn("dump_form", names)
+        self.assertIn("check_egress_ip", names)
 
     # ── Handler tests ────────────────────────────────────────────────
     # Handlers store mocks directly (no .return_value indirection).
