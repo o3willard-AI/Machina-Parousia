@@ -282,6 +282,23 @@ def _build_server() -> tuple[Server, AccountStore]:
                         "body": {"type": "string", "description": "Plain-text email body"},
                         "reply_to": {"type": "string", "description": "Optional Reply-To address"},
                         "from_agent": {"type": "string", "description": "Optional agent ID to send from (defaults to first configured agent)"},
+                        # MP-17: calendar invite payload. ORGANIZER is DERIVED
+                        # from the authenticated From identity inside the
+                        # sender (an agent-supplied ORGANIZER line is
+                        # stripped) — there is deliberately NO organizer or
+                        # raw_mime parameter (a verbatim MIME blob would let
+                        # a caller spoof From/ORGANIZER).
+                        "ics": {
+                            "type": "string",
+                            "description": (
+                                "Optional iCalendar (RFC 5545) VEVENT payload. "
+                                "When set, the email is sent as a calendar "
+                                "invitation (text/calendar; method=REQUEST). "
+                                "ORGANIZER/ATTENDEE are derived from the "
+                                "sender identity and recipient — never from "
+                                "this payload."
+                            ),
+                        },
                     },
                     "required": ["to", "subject", "body"],
                 },
@@ -675,6 +692,10 @@ async def _handle_send_email(
     subject = arguments["subject"]
     body = arguments["body"]
     reply_to = arguments.get("reply_to")
+    # MP-17: optional iCalendar VEVENT payload — when set, the sender
+    # builds the calendar-invite MIME (ORGANIZER/ATTENDEE derived inside
+    # email_sender, never from this payload).
+    ics = arguments.get("ics")
 
     # ── Resolve agent_id ────────────────────────
     # Authenticated caller's account is the strongest signal. On stdio
@@ -796,6 +817,7 @@ async def _handle_send_email(
         message_id = _smtp_send(
             to=to, subject=subject, body=body,
             from_addr=from_addr, reply_to=reply_to,
+            ics=ics,
         )
     except Exception as e:
         logger.error("SMTP send failed", extra={"error": str(e)})
