@@ -89,6 +89,13 @@ class SpatialConfig(BaseModel):
     proxy_servers: dict[str, str] = Field(default_factory=dict)
     # Default egress proxy for agents with no explicit mapping ("" = direct).
     proxy_default: str = ""
+    # ── MP-9: full fingerprint hardening ("stealth") is OPT-IN and OFF by
+    # default (issue #15) — ordinary browsing stays exactly as today. When
+    # enabled, the pool injects the stealth init script (webdriver →
+    # undefined, window.chrome, plugins/languages/platform realism, WebGL
+    # vendor/renderer, history.length) INSTEAD of the plain webdriver-
+    # suppression script. ──
+    stealth_enabled: bool = False
     crawl4ai: Crawl4aiConfig = Field(default_factory=Crawl4aiConfig)
 
 
