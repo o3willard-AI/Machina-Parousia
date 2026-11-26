@@ -24,6 +24,11 @@ dependencies = [
     "python-dateutil>=2.8",
     "dkimpy>=1.1.0",
     "cryptography>=41.0",
+    # MP-13 (Fix 1): imported at module level in spatial/serializer.py
+    # (from bs4 import BeautifulSoup) — the missing declaration broke
+    # fresh installs (`pip install -e .` then `serve` died with
+    # ModuleNotFoundError: bs4).
+    "beautifulsoup4>=4.12",
     # Mem0 presence memory (4th domain): recorder + Qdrant client.
     # fastembed is mem0's optional local-ONNX embedder (its default here),
     # so it is pinned directly rather than relying on mem0ai's extras.

@@ -28,7 +28,10 @@ def cli():
 @click.option("--email", default=None, help="Email for Let's Encrypt notifications (for --tls).")
 @click.option("--staging", is_flag=True, help="Use Let's Encrypt staging (for --tls).")
 @click.option("--dry-run", is_flag=True, help="Preview changes without applying (for --tls).")
-def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_run):
+# MP-13 (Fix 4): the DKIM path's guidance referenced `--rotate` but no such
+# option existed — expose it, wired to the helper's existing `rotate` param.
+@click.option("--rotate", is_flag=True, help="Rotate DKIM keys: save with a timestamp suffix and keep the old key (for --dkim).")
+def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_run, rotate):
     """Configure Parousia components: Postfix aliases or DKIM keys."""
     if gen_config:
         import os
@@ -62,7 +65,10 @@ def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_r
             "rate_limits": {"per_agent_per_hour": 100, "domain_per_day": 500},
             "postfix": {"aliases_file": "/etc/aliases", "guard_script": "/usr/local/bin/parousia-guard"},
             "dkim": {"key_dir": "/etc/parousia/dkim", "selector": "default"},
-            "server": {"rest_host": "127.0.0.1", "rest_port": 8080, "mcp_host": "0.0.0.0", "mcp_port": 8081},
+            # MP-13 (Fix 3): no rest_host/rest_port — REST is deliberately
+            # internal (loopback 127.0.0.1:8080, hardcoded in serve).
+            # MP-13 (Fix 2): mcp_host defaults to loopback.
+            "server": {"mcp_host": "127.0.0.1", "mcp_port": 8081},
             "logging": {"level": "info", "format": "json", "output": "syslog"},
         }
 
@@ -82,8 +88,11 @@ def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_r
         config = load_config()
         click.echo(f"Generating DKIM keys for {config.domain}...")
 
+        # MP-13 (Fix 4): --rotate wires through to the helper's rotate param
+        # (timestamp-suffixed new key, old key kept).
         public_pem = generate_dkim_keys(
-            config.domain, config.dkim.key_dir, config.dkim.selector
+            config.domain, config.dkim.key_dir, config.dkim.selector,
+            rotate=rotate,
         )
         if public_pem is None:
             key_path = os.path.join(config.dkim.key_dir, f"{config.domain}.key")
@@ -103,6 +112,7 @@ def setup(postfix, dkim, tls, postfwd, gen_config, domain, email, staging, dry_r
         click.echo("Usage: parousia-guard setup [--postfix | --dkim | --tls | --postfwd | --config]")
         click.echo("  --postfix    Configure Postfix aliases for pipe-to-agent delivery")
         click.echo("  --dkim       Generate DKIM keys and DNS records")
+        click.echo("  --rotate     Rotate DKIM keys (with --dkim): timestamp-suffixed new key, old key kept")
         click.echo("  --tls        Set up TLS certificates via Let's Encrypt")
         click.echo("  --postfwd    Set up postfwd Tier 2 SMTP rate limiting")
         click.echo("  --config     Generate config file with defaults")
@@ -401,14 +411,23 @@ def migrate_agents(db, config_path):
 @click.option("--rest", "mode_rest", is_flag=True, help="Start REST ingress server")
 @click.option("--mcp", "mode_mcp", is_flag=True, help="Start MCP outbound server (stdio transport)")
 @click.option("--mcp-sse", "mode_mcp_sse", is_flag=True, help="Start MCP outbound server (SSE transport)")
-@click.option("--mcp-host", default="0.0.0.0", help="MCP SSE bind address (default: 0.0.0.0)")
+@click.option("--mcp-host", default="127.0.0.1", help="MCP SSE bind address (default: 127.0.0.1, loopback — pass 0.0.0.0 explicitly to expose)")
 @click.option("--mcp-port", default=8081, type=int, help="MCP SSE port (default: 8081)")
 @click.option("--all", "mode_all", is_flag=True, help="Start REST + MCP SSE servers")
 def serve(mode_rest, mode_mcp, mode_mcp_sse, mcp_host, mcp_port, mode_all):
     """Start Parousia guard servers."""
-    if mode_all or (not mode_rest and not mode_mcp and not mode_mcp_sse):
+    # MP-13 (Fix 2): a bare `serve` starts REST ONLY. The public MCP SSE
+    # endpoint must be requested explicitly (--mcp-sse / --all) — it was
+    # previously started by default and bound 0.0.0.0, an undocumented
+    # public endpoint. --mcp-host now also defaults to loopback
+    # (127.0.0.1); an operator opts into 0.0.0.0 explicitly.
+    if mode_all:
         mode_rest = True
         mode_mcp = True
+    elif not mode_rest and not mode_mcp and not mode_mcp_sse:
+        mode_rest = True
+        mode_mcp = False
+        mode_mcp_sse = False
 
     if mode_rest and mode_mcp:
         # Start both: REST in daemon thread, MCP SSE in main thread

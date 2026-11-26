@@ -738,7 +738,24 @@ async def _handle_send_email(
             )]
 
     # Rate limit check
-    allowed, remaining, reset_seconds = rate_limiter.check(agent_id)
+    # MP-13 (Fix 6): the PER-ACCOUNT limit is authoritative (fail-closed) —
+    # the authenticated/validated account row's rate_limit_per_hour (DB
+    # default 20) governs the send. config.rate_limits.per_agent_per_hour
+    # (100) is a FALLBACK only, for callers with no account row (the stdio
+    # "default" sentinel without auth). After this fix, GET /account and
+    # the enforced limit agree (both 20 by default).
+    # `acct` is the validated account row on the agent_id != "default"
+    # paths (the validation block above returns early otherwise); on the
+    # "default" sentinel path the authenticated account row, when any.
+    account_row = acct if agent_id != "default" else account
+    per_agent_limit = (
+        int(account_row.rate_limit_per_hour)
+        if account_row is not None
+        else None
+    )
+    allowed, remaining, reset_seconds = rate_limiter.check(
+        agent_id, per_agent_limit=per_agent_limit
+    )
     if not allowed:
         return [TextContent(
             type="text",

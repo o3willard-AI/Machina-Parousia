@@ -1,11 +1,13 @@
 """Redis-backed token-bucket rate limiter for Parousia Guard.
 
-Per-agent limit: 100 emails/hour. Domain-wide limit: 500/day.
-Fails open (ALLOW) when Redis is unreachable.
+Per-agent limit: the ACCOUNT's rate_limit_per_hour is authoritative
+(MP-13 Fix 6; DB default 20/hour) — config.rate_limits.per_agent_per_hour
+is only the fallback when no account row exists. Domain-wide limit:
+500/day. Fails open (ALLOW) when Redis is unreachable.
 """
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger("parousia.rate_limiter")
 
@@ -21,15 +23,28 @@ class RateLimiter:
         self.per_agent_per_hour = per_agent_per_hour
         self.domain_per_day = domain_per_day
 
-    def check(self, agent_id: str) -> Tuple[bool, int, int]:
+    def check(
+        self, agent_id: str, per_agent_limit: Optional[int] = None
+    ) -> Tuple[bool, int, int]:
         """Check if an agent is allowed to send email.
 
         Args:
-            agent_id: The agent identifier (e.g., "hermes").
+            agent_id: The agent identifier (e.g. "hermes").
+            per_agent_limit: MP-13 (Fix 6) — the AUTHENTICATED account's
+                ``rate_limit_per_hour``, authoritative over the
+                constructor's configured default (which becomes a
+                fallback for callers with no account row, e.g. the
+                stdio "default" sentinel without auth).
 
         Returns:
             (allowed, remaining, reset_seconds) tuple.
         """
+        # MP-13 (Fix 6): the per-ACCOUNT limit wins when provided.
+        per_agent_per_hour = (
+            int(per_agent_limit)
+            if per_agent_limit is not None
+            else self.per_agent_per_hour
+        )
         agent_key = f"rate:agent:{agent_id}"
         domain_key = "rate:domain"
 
@@ -39,7 +54,7 @@ class RateLimiter:
             if agent_count == 1:
                 self._redis.expire(agent_key, 3600)  # 1-hour window
 
-            agent_remaining = max(0, self.per_agent_per_hour - agent_count)
+            agent_remaining = max(0, per_agent_per_hour - agent_count)
             agent_reset = self._redis.ttl(agent_key)
 
             # Domain-wide check
@@ -50,7 +65,7 @@ class RateLimiter:
             domain_remaining = max(0, self.domain_per_day - domain_count)
             domain_reset = self._redis.ttl(domain_key)
 
-            if agent_count > self.per_agent_per_hour:
+            if agent_count > per_agent_per_hour:
                 logger.warning(
                     "agent rate limit exceeded",
                     extra={"agent_id": agent_id, "count": agent_count},
