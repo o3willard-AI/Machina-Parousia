@@ -105,6 +105,18 @@ class CredentialStoreConfig(BaseModel):
     key_path: str = "/var/lib/parousia/credential_store.key"
 
 
+class TOTPStoreConfig(BaseModel):
+    """MP-8: server-side TOTP vault (RFC 6238) for app-based 2FA.
+
+    Same Fernet-at-rest approach as the credential store. Secrets are
+    account-scoped and only ever decrypted in memory to compute a code —
+    no tool response ever carries them.
+    """
+
+    db_path: str = "/var/lib/parousia/totp.db"
+    key_path: str = "/var/lib/parousia/totp_store.key"
+
+
 class AccountStoreConfig(BaseModel):
     db_path: str = "/var/lib/parousia/accounts.db"
 
@@ -133,6 +145,7 @@ class ParousiaConfig(BaseModel):
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     spatial: SpatialConfig = Field(default_factory=SpatialConfig)
     credential_store: CredentialStoreConfig = Field(default_factory=CredentialStoreConfig)
+    totp_store: TOTPStoreConfig = Field(default_factory=TOTPStoreConfig)
     account_store: AccountStoreConfig = Field(default_factory=AccountStoreConfig)
     admin: AdminConfig = Field(default_factory=AdminConfig)
     invites: InvitesConfig = Field(default_factory=InvitesConfig)
