@@ -17,10 +17,10 @@ Send email from an agent identity.
 | `to` | ✅ | Recipient email address |
 | `subject` | ✅ | Email subject line |
 | `body` | ✅ | Plain-text email body |
-| `from_agent` | ❌ | Agent ID to send from (defaults to first configured agent) |
+| `from_agent` | ❌ | Agent ID to send from (defaults to the **authenticated account**; an authenticated caller may only send as itself) |
 | `reply_to` | ❌ | Reply-To address |
 
-**Rate limits:** 100/hr per agent, 500/day domain-wide. Redis-backed token bucket.
+**Rate limits:** 20/hr per account (enforced — the account's `rate_limit_per_hour`, default 20; the config `per_agent_per_hour` 100 is only the fallback when no account row exists), 500/day domain-wide. Redis-backed token bucket.
 
 **Request example:**
 ```json
@@ -73,7 +73,7 @@ Read an agent's email inbox. Messages are stored per-agent in SQLite, delivered 
 | `agent_id` | ❌ | Which inbox to read (defaults to the authenticated account) |
 | `unread_only` | ❌ | If `true`, return only unread messages (default: `true`) |
 | `include_archived` | ❌ | If `true`, include archived messages (default: `false` — archived mail is excluded, so archiving shrinks the listing) |
-| `limit` | ❌ | Max messages to return (default: 20, max: 100) |
+| `limit` | ❌ | Max messages to return (default: **10**; no max enforced — the handler passes the value straight through) |
 
 **Request:**
 ```json
@@ -86,35 +86,36 @@ Read an agent's email inbox. Messages are stored per-agent in SQLite, delivered 
 }
 ```
 
-**Response:**
+**Response:** (the real handler shape — `body_preview` is the first 200 chars of the body; there is no full `body` and no `recipient` field)
 ```json
 {
-  "agent_id": "hermes",
   "count": 2,
+  "unread_only": true,
+  "include_archived": false,
   "messages": [
     {
       "id": "msg_abc123",
       "sender": "stephen@example.com",
-      "recipient": "hermes@yourdomain.com",
       "subject": "Deploy Parousia to production",
-      "body": "The staging tests passed. Let's ship it today.",
       "received_at": "2026-06-11T14:30:00Z",
-      "read": false
+      "read": false,
+      "archived": false,
+      "body_preview": "The staging tests passed. Let's ship it today."
     },
     {
       "id": "msg_def456",
       "sender": "github@notifications.github.com",
-      "recipient": "hermes@yourdomain.com",
       "subject": "[MR-Krabs] PR #48 merged",
-      "body": "Pull request #48 was merged into main.",
       "received_at": "2026-06-11T13:15:00Z",
-      "read": false
+      "read": false,
+      "archived": false,
+      "body_preview": "Pull request #48 was merged into main."
     }
   ]
 }
 ```
 
-Messages are marked read when returned. To re-read old messages, set `unread_only: false`.
+Listing a message does **not** mark it read — `check_inbox` is side-effect-free. Use `mark_read` to change read state; set `unread_only: false` to re-list already-read mail.
 
 Archived messages are **excluded from the default listing** (`include_archived` defaults to `false`), so `archive()` is a real view state — as a watcher archives handled mail, its `check_inbox` listing shrinks instead of re-reporting the same messages forever. Pass `include_archived: true` to see archived mail.
 
@@ -122,7 +123,7 @@ Archived messages are **excluded from the default listing** (`include_archived` 
 
 ### `read_message`
 
-Read a single message by its ID and mark it read.
+Read a single message by its ID. Does **not** mark it read — reading is side-effect-free; use `mark_read` to change read state.
 
 **Parameters:**
 
@@ -138,7 +139,7 @@ Read a single message by its ID and mark it read.
 }
 ```
 
-**Response:** the full message (id, sender, recipient, subject, body, received_at, read).
+**Response:** the full stored message — `id, sender, recipient, subject, body_text, body_html, received_at, read, archived`.
 
 ---
 
@@ -249,7 +250,7 @@ Two layers of rate limiting:
 
 | Layer | Mechanism | Limit |
 |-------|-----------|-------|
-| **Application** (Parousia Guard) | Redis token bucket | 100/hr per agent, 500/day domain-wide |
+| **Application** (Parousia Guard) | Redis token bucket | 20/hr per account (enforced — `rate_limit_per_hour`, default 20; config `per_agent_per_hour` 100 only when no account row exists), 500/day domain-wide |
 | **MTA** (postfwd) | SMTP-level rules | Configurable in `config/postfwd/rules.cf` |
 
 When rate limits are hit, `send_email` returns an error with `retry_after_seconds`. The agent should wait and retry.
@@ -289,7 +290,7 @@ parousia-guard approval reject <id> --reason "Spam content"
 All MCP tools require an API key. Include it in every request header:
 
 ```
-Authorization: Bearer psk_your_api_key_here
+Authorization: Bearer po_your_api_key_here
 ```
 
 Keys are created at onboarding (POST `/onboard`), bcrypt-hashed at rest in `accounts.db`, and shown exactly once. Rotate via `POST /account/rotate-key`.
@@ -300,13 +301,13 @@ Keys are created at onboarding (POST `/onboard`), bcrypt-hashed at rest in `acco
 
 ## Multi-agent routing
 
-Every agent in your config gets its own identity:
+Every onboarded agent has its own identity:
 
 ```
 hermes@yourdomain.com    → agent_id: hermes
 mr-krabs@yourdomain.com  → agent_id: mr-krabs
 ```
 
-The `send_email` tool defaults to the first configured agent. Use `from_agent` to specify which agent is sending. Rate limits are enforced per-agent — one agent hitting its limit doesn't block others.
+The `send_email` tool defaults to the **authenticated account** (`from_agent` is validated against it — an authenticated agent may only send as itself; the stdio no-auth fallback is the `"default"` sentinel). Rate limits are enforced per-account — one account hitting its limit doesn't block others.
 
 The `check_inbox` tool always reads from the calling agent's inbox — agents cannot read each other's mail.

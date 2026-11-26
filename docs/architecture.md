@@ -27,7 +27,7 @@ How Parousia's components fit together and what happens when things happen.
                    │  │  :8080       │
                    │  │              │  /health /ingest /metrics
                    │  │              │  /dashboard /approval/*
-                   │  │              │  /onboarding /account/*
+                   │  │              │  /onboard /account/*
                    │  ├──────────────┤
                    │  │  MCP Server  │  Stdio (spawned per-agent)
                    │  │  (stdio/SSE) │  SSE (:8081) for remote agents
@@ -46,15 +46,17 @@ How Parousia's components fit together and what happens when things happen.
                    │  │  Spatial     │  Playwright → per-agent Chromium
                    │  │  Engine      │  SDOM serializer, browser pool
                    │  ├──────────────┤
-                   │  │  Memory      │  Mem0 recorder: 16 formatters
+                   │  │  Memory      │  Mem0 recorder: 11 formatters
                    │  │  Engine      │  Circuit breaker, fire-and-forget
-                   │  │              │  ──writes──→ Qdrant :6333
+                   │  │              │  writes → Qdrant :6333; reads →
+                   │  │              │  mem0_search / mem0_profile (MP-11)
                    │  ├──────────────┤
                    │  │  Account     │  SQLite: accounts + api_key_events
                    │  │  Store       │  bcrypt hashing, tier management
                    │  ├──────────────┤
                    │  │  Rate        │  Redis token bucket
-                   │  │  Limiter     │  100/hr per agent, 500/day domain
+                   │  │  Limiter     │  20/hr per account (default),
+                   │  │              │  500/day domain
                    │  └──────────────┤
                    │                 │
                    │  Redis :6379    │  Rate-limit counters
@@ -72,13 +74,13 @@ Parousia has three transport modes, started from the same `parousia-guard serve`
 |--------|-----------|-----------|------|
 | **REST** | Systemd daemon (`parousia-guard serve --rest`) | HTTP | 127.0.0.1:8080 |
 | **MCP (stdio)** | Per-agent subprocess (`parousia-guard serve --mcp`) | Stdio (stdin/stdout) | None |
-| **MCP (SSE)** | Long-running daemon (`parousia-guard serve --mcp-sse`) | HTTP SSE | 0.0.0.0:8081 |
+| **MCP (SSE)** | Long-running daemon (`parousia-guard serve --mcp-sse` or `--all`) | HTTP SSE | 127.0.0.1:8081 (loopback default; explicit `--mcp-host` to expose) |
 
 The REST server runs continuously as a systemd service. It handles health checks, email ingest from Postfix, metrics, onboarding, and account management.
 
 The MCP stdio server is **spawned on demand** by each agent — the agent's host runs `parousia-guard serve --mcp` as a subprocess and communicates via stdin/stdout using the MCP JSON-RPC protocol.
 
-The MCP SSE server runs as a **persistent daemon** bound to a public port. Remote agents connect via HTTP SSE at `/sse` and post messages to `/messages/`. This is the transport used for multi-agent deployments where agents run on separate hosts (AWS VMs, lab machines).
+The MCP SSE server runs as a **persistent daemon**. **By default it binds loopback `127.0.0.1:8081`** (fail-closed); an operator passes an explicit public `--mcp-host` value to expose it. Remote agents connect via HTTP SSE at `/sse` and post messages to `/messages/`. This is the transport used for multi-agent deployments where agents run on separate hosts (AWS VMs, lab machines).
 
 All three servers share the same codebase, same config file, same database files, and same Redis + Qdrant instances.
 
@@ -120,18 +122,20 @@ Agents can bridge them: browse a conference website (spatial), extract dates, sc
 
 **Direction:** Read by all components on every authenticated request
 
-Every MCP and REST request (except `/health` and `/onboarding`) goes through:
+Every MCP and REST request (except the unauthenticated public set) goes through:
 1. Extract account identity from auth context (MCP: context variable set by transport; REST: `Authorization: Bearer` header)
 2. AccountStore.lookup() — validate API key
 3. Resolve `account_id`, `tier`, `status`
 4. Inject into request context
 5. All downstream operations scope by `account_id`
 
+**Unauthenticated public REST paths** (the `AgentAuthMiddleware` `public_paths` set, beyond `/health` and `/onboard`): `/ingest`, `/approval/pending`, `/metrics`, `/dashboard`, `/admin`, `/docs`, `/openapi.json` — see `src/parousia/guard/rest_server.py`. (`/admin` endpoints carry their own `PAROUSIA_ADMIN_KEY` auth; `/ingest` validates the agent against AccountStore and is meant to be reached only by the local Postfix pipe.)
+
 `accounts.db` (the AccountStore) is the **single source of truth** for agent identities — the legacy `config.yaml` `agents:` block has been removed. Agents that predate onboarding (e.g. migrated config-only agents) hold accounts with an empty `api_key_hash` and authenticate via ingest/stdio, never the API-key path.
 
 ### Memory Engine ↔ MCP Server
 
-**Direction:** MCP Server → Memory Engine (write only, fire-and-forget)
+**Direction:** MCP Server → Memory Engine (writes: fire-and-forget; reads: MP-11 `mem0_search`/`mem0_profile`, account-scoped)
 
 Every write-side tool call in `handle_call_tool()` triggers a memory record:
 
@@ -143,7 +147,7 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
 
 **Circuit breaker:** 5 consecutive Mem0 failures → circuit opens for 120s. All writes are silently skipped. Tool calls never block on memory.
 
-**Skipped tools:** `get_temporal_context`, `extract_page_state` (read-only). Failed tool calls are also skipped — only successful write-side actions are recorded.
+**Skipped tools:** `get_temporal_context`, `extract_page_state` (read-only). A **failed `send_email` is still recorded** (the formatter emits a failure fact); `browse_to`/`interact` errors are skipped. Memory reads (`mem0_search`/`mem0_profile`) are never themselves recorded.
 
 **Key property:** If Qdrant is down, every tool call still works. The circuit breaker ensures memory failures never degrade agent functionality. Facts resume recording automatically when Qdrant recovers.
 
@@ -170,6 +174,8 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
 5. Pipe POSTs to REST ingest endpoint
    → POST http://127.0.0.1:8080/ingest
    → JSON payload: {sender, recipient, subject, body, agent_id}
+   → agent_id is REQUIRED (no default) — the local part of the recipient;
+     every inbound mail 422s without it
 
 6. REST /ingest handler
    → Validates required fields
@@ -184,8 +190,9 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
 8. Agent reads via MCP check_inbox
    → Agent spawns parousia-guard serve --mcp
    → MCP tool call: check_inbox
-   → InboxStore.get_messages(agent_id, unread_only=True)
-   → Messages marked read
+   → InboxStore.list_messages(agent_id, unread_only=True)
+   → Listing is side-effect-free — messages stay unread
+     until mark_read changes the state
 ```
 
 ## Life of an MCP temporal call
@@ -284,8 +291,8 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
      → Writes to SQLite history DB
 
 7. Fact is now searchable
-   → No memory MCP tool — agents query Qdrant directly by user_id filter
-   → Qdrant vector search returns fact with score
+   → Own facts: mem0_search / mem0_profile (the MP-11 read tools,
+     account-scoped) — no direct Qdrant needed
    → Cross-agent: query Qdrant with a `user_id` prefix filter (e.g. `parousia-`)
 ```
 
@@ -305,16 +312,18 @@ Every write-side tool call in `handle_call_tool()` triggers a memory record:
 
 ## Database layout
 
-All databases are SQLite files in `/var/lib/parousia/` (configurable):
+All databases are SQLite files (configurable; `inbox.db` lives relative to the service working directory):
 
 ```
 /var/lib/parousia/
 ├── temporal.db       # events + journal tables
 ├── accounts.db        # accounts + api_key_events tables
-├── inbox.db           # inbox_messages table (or data/inbox.db)
 ├── mem0_history.db    # Mem0 audit log (SQLite)
 ├── browsers/          # per-agent Chromium profile directories
 └── mem0/              # Qdrant vector storage (if using local file-backed Qdrant)
+
+data/inbox.db           # inbox_messages table (InboxStore default —
+                       # relative to the service working directory)
 ```
 
 ---
@@ -325,10 +334,13 @@ All databases are SQLite files in `/var/lib/parousia/` (configurable):
 domain: yourdomain.com
 
 server:
-  rest_host: "127.0.0.1"
-  rest_port: 8080
-  mcp_host: "0.0.0.0"
-  mcp_port: 8081          # for reference only — MCP uses stdio transport
+  # MP-13: the REST host/port config keys are GONE — REST is deliberately
+  # internal, hardcoded loopback 127.0.0.1:8080 (not configurable).
+  # Bare `serve` starts REST only; MCP SSE needs an explicit
+  # `--mcp-sse` or `--all`. mcp_host defaults to loopback (fail-closed) —
+  # pass an explicit public --mcp-host value to expose the SSE endpoint.
+  mcp_host: "127.0.0.1"
+  mcp_port: 8081
 
 # Agents are onboarded into accounts.db (no `agents:` block) — see ONBOARDING.md
 

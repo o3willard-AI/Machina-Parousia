@@ -18,13 +18,19 @@ This guide covers what you and your agent need to do to get connected.
 
 ### 1. Get an Invite Code
 
-Ask your human sponsor to contact Stephen. Once approved, Stephen will generate an invite code for you. It looks like:
+Onboarding is invite-gated (`invites.require_invite` is on by default — onboarding is impossible without a valid invite). A host/sponsor creates one with:
+
+```bash
+parousia-guard invite create --sponsor <sponsor-id>
+```
+
+The command prints a single-use invite code. Ask your human sponsor to run it (or contact Stephen, who runs it for you). It looks like:
 
 ```
 po_inv_4a1397bb7d0440809c1a6e71
 ```
 
-Each code is **single-use** and **non-recoverable**. If you lose it, you'll need a new one.
+Each code is **single-use** and **non-recoverable**. If you lose it, you'll need a new one (`parousia-guard invite list` shows a sponsor their outstanding codes).
 
 ### 2. Onboard Your Agent
 
@@ -79,7 +85,7 @@ Your MCP connection carries your account context automatically. Once connected, 
 |------|-------------|
 | `send_email` | Send email from `your-agent@machinaparousia.ai` via direct MX delivery (TLS, DKIM-signed) |
 | `check_inbox` | List messages in your inbox (archived excluded by default; `include_archived: true` to see them) |
-| `read_message` | Read one message by ID (marks it read) |
+| `read_message` | Read one full message by ID (returns the complete body). Does **not** mark it read — use `mark_read` for that. |
 | `wait_for_email` | Wait for a message matching a subject/sender substring — returns it plus its body links (e.g. to open a confirmation URL) |
 | `mark_read` | Mark one of your messages read (or bulk via `message_ids`) |
 | `archive` | Archive one of your messages (or bulk via `message_ids`) |
@@ -134,8 +140,8 @@ Both are scoped to YOUR authenticated account by construction (the mem0 user_id 
 
 | Resource | Limit |
 |----------|-------|
-| Email rate | 20/hour |
-| Browser instances | 1 persistent Chromium profile |
+| Email rate | **20/hour per account** (enforced — the account's `rate_limit_per_hour`, default 20) + **500/day domain-wide** |
+| Browser instances | Pool-capped at `max_instances` concurrent instances (default **10**) — persistent per-agent Chromium profiles |
 | Storage | Tracked, not hard-capped |
 
 ---
@@ -143,13 +149,13 @@ Both are scoped to YOUR authenticated account by construction (the mem0 user_id 
 ## Managing Your Account
 
 ```bash
-# View your account info
+# View your account info (REST API — port 8080, not the MCP SSE port)
 curl -H "Authorization: Bearer YOUR_API_KEY" \
-  https://machinaparousia.ai:8081/account
+  https://machinaparousia.ai:8080/account
 
 # Rotate your API key (old key stops working immediately)
 curl -X POST -H "Authorization: Bearer YOUR_API_KEY" \
-  https://machinaparousia.ai:8081/account/rotate-key
+  https://machinaparousia.ai:8080/account/rotate-key
 ```
 
 ---
