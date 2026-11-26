@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import atexit
 import asyncio
+import hashlib
 import shutil
 import os
 import time
@@ -37,6 +38,10 @@ class SpatialConfig:
     # agent_id -> proxy URL; default egress proxy; "" = direct (off).
     proxy_servers: dict = field(default_factory=dict)
     proxy_default: str = ""
+    # MP-10a: named proxy registry — name -> proxy URL, a MENU of
+    # available transports (never a routing rule). Kept in sync with
+    # parousia.config.SpatialConfig (the canonical pydantic config).
+    proxies: dict = field(default_factory=dict)
     # MP-9: full fingerprint hardening — opt-in, OFF by default. Kept in
     # sync with parousia.config.SpatialConfig (the canonical pydantic
     # config); see the comment there.
@@ -269,12 +274,36 @@ class BrowserPoolManager:
             except Exception:
                 pass
 
-    def _launch_kwargs(self, agent_id: str) -> dict:
+    def _pool_key(self, agent_id: str, override_proxy: str = "") -> str:
+        """MP-10a: the pool/profile key for a browser context.
+
+        No ``override_proxy`` → the bare ``agent_id`` (today's behavior,
+        byte-for-byte — the agent's DEFAULT context). An agent-CALLED
+        named transport (resolved name->URL by the tools layer) gets its
+        OWN persistent context keyed by agent + a short stable hash of
+        the proxy URL: a profile dir is locked to one running Chromium
+        instance, and the transport's session state (cookies etc.) stays
+        isolated per (agent, proxy).
+        """
+        if not override_proxy:
+            return agent_id
+        digest = hashlib.sha256(override_proxy.encode("utf-8")).hexdigest()[:12]
+        return f"{agent_id}__px-{digest}"
+
+    def _launch_kwargs(self, agent_id: str, override_proxy: str = "") -> dict:
         """MP-3 (part A): per-agent launch kwargs for the identity + egress.
 
         Applies the configured identity (UA / viewport / locale / timezone)
         and the egress proxy selection. Called from ``get_browser`` only, so
         the identity is consistent for the life of the persistent context.
+
+        MP-10a: ``override_proxy`` — a non-empty resolved proxy URL from the
+        agent-CALLED ``proxy`` argument (a name from the ``spatial.proxies``
+        menu). Non-empty → it OVERRIDES the operator mapping
+        (``proxy_for``) for this fresh context. Empty (the default, when
+        the agent did not ask) → the operator mapping applies exactly as
+        before; a request with no ``proxy`` argument NEVER sets a proxy
+        beyond the operator's own mapping.
         """
         cfg = self.config
         args = list(getattr(cfg, "launch_args", []) or [])
@@ -301,9 +330,14 @@ class BrowserPoolManager:
             kwargs["locale"] = cfg.locale
         if getattr(cfg, "timezone_id", ""):
             kwargs["timezone_id"] = cfg.timezone_id
-        proxy = self.proxy_for(agent_id)
-        if proxy:
-            kwargs["proxy"] = {"server": proxy}
+        if override_proxy:
+            # MP-10a: the agent CALLED this transport by name — it wins
+            # over the operator mapping for this fresh context.
+            kwargs["proxy"] = {"server": override_proxy}
+        else:
+            proxy = self.proxy_for(agent_id)
+            if proxy:
+                kwargs["proxy"] = {"server": proxy}
         return kwargs
 
     def proxy_for(self, agent_id: str) -> str:
@@ -318,27 +352,37 @@ class BrowserPoolManager:
             return explicit
         return getattr(self.config, "proxy_default", "") or ""
 
-    async def get_browser(self, agent_id: str) -> BrowserInstance:
+    async def get_browser(self, agent_id: str, override_proxy: str = "") -> BrowserInstance:
         """Get a browser instance for the given agent ID.
 
         Re-validates liveness of a cached instance and relaunches if it has
         died, so callers never receive a stale/poisoned browser.
+
+        MP-10a (issue #11 ws1, chunk 1): ``override_proxy`` — an
+        agent-CALLED, per-REQUEST transport override (a proxy URL resolved
+        by NAME from the ``spatial.proxies`` menu by the tools layer).
+        Non-empty → a separate persistent context is launched through
+        that proxy, keyed by (agent, proxy) — see ``_pool_key``. Empty
+        (the default — the agent sent no ``proxy`` argument) → the
+        agent's DEFAULT context, byte-for-byte today's behavior with the
+        operator mapping (``proxy_for``) intact.
         """
-        if agent_id in self._browsers:
-            browser_instance = self._browsers[agent_id]
+        key = self._pool_key(agent_id, override_proxy)
+        if key in self._browsers:
+            browser_instance = self._browsers[key]
             if browser_instance.is_alive():
                 browser_instance.last_used_at = time.time()
                 return browser_instance
             # Cached browser has died (crashed Chromium / stuck driver) —
             # close it and fall through to a fresh launch.
-            await self._close_instance(agent_id)
+            await self._close_instance(key)
 
         # Enforce max_instances
         if len(self._browsers) >= self.config.max_instances:
             raise RuntimeError(f"Max instances ({self.config.max_instances}) reached")
 
         # Check if profile is locked
-        profile_dir = Path(self.config.profile_dir) / agent_id
+        profile_dir = Path(self.config.profile_dir) / key
         lock_file = profile_dir / "profile.lock"
 
         # Check for existing lock file
@@ -352,12 +396,12 @@ class BrowserPoolManager:
                 timestamp = lock_data.get('timestamp', 0)
 
                 # Check if the lock is for this agent
-                if lock_agent_id == agent_id:
+                if lock_agent_id == key:
                     # Lock is for this agent, check if process is still alive
                     try:
                         os.kill(pid, 0)  # This will raise OSError if process doesn't exist
                         # Process exists, raise error
-                        raise ProfileInUseError(f"Profile for agent {agent_id} is already in use by PID {pid}")
+                        raise ProfileInUseError(f"Profile for agent {key} is already in use by PID {pid}")
                     except OSError:
                         # Process doesn't exist, clear the stale lock
                         pass
@@ -366,7 +410,7 @@ class BrowserPoolManager:
                     try:
                         os.kill(pid, 0)  # Check if process exists
                         # Process exists, raise error
-                        raise ProfileInUseError(f"Profile for agent {agent_id} is already in use by PID {pid}")
+                        raise ProfileInUseError(f"Profile for agent {key} is already in use by PID {pid}")
                     except OSError:
                         # Process doesn't exist, clear the stale lock and proceed
                         pass
@@ -388,17 +432,17 @@ class BrowserPoolManager:
         # Create new lock file
         lock_data = {
             'pid': os.getpid(),
-            'agent_id': agent_id,
+            'agent_id': key,
             'timestamp': time.time()
         }
 
         try:
             with open(lock_file, 'w') as f:
                 json.dump(lock_data, f)
-            self._lock_files[agent_id] = lock_file
+            self._lock_files[key] = lock_file
         except Exception:
             # If we can't create the lock file, we can't proceed safely
-            raise ProfileInUseError(f"Could not create lock file for agent {agent_id}")
+            raise ProfileInUseError(f"Could not create lock file for agent {key}")
 
         # Try to launch browser up to 3 times
         for attempt in range(3):
@@ -406,8 +450,10 @@ class BrowserPoolManager:
                 playwright = await async_playwright().start()
                 # MP-3 (part A): identity + egress kwargs per agent
                 # (UA/viewport/locale/timezone from config; proxy selection
-                # config-driven, default off).
-                launch_kwargs = self._launch_kwargs(agent_id)
+                # config-driven, default off). MP-10a: an agent-CALLED
+                # named transport (override_proxy) replaces the operator
+                # mapping for this context.
+                launch_kwargs = self._launch_kwargs(agent_id, override_proxy)
                 launch_kwargs["user_data_dir"] = str(profile_dir)
                 browser = await playwright.chromium.launch_persistent_context(
                     **launch_kwargs
@@ -459,7 +505,7 @@ class BrowserPoolManager:
 
         # Create the BrowserInstance
         browser_instance = BrowserInstance(
-            agent_id=agent_id,
+            agent_id=key,
             playwright=playwright,
             browser=browser,
             context=browser,
@@ -471,7 +517,7 @@ class BrowserPoolManager:
             user_agent=getattr(self.config, "user_agent", "") or "",
         )
 
-        self._browsers[agent_id] = browser_instance
+        self._browsers[key] = browser_instance
         return browser_instance
 
     def release_browser(self, agent_id: str):
