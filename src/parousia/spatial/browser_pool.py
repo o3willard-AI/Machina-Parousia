@@ -37,6 +37,10 @@ class SpatialConfig:
     # agent_id -> proxy URL; default egress proxy; "" = direct (off).
     proxy_servers: dict = field(default_factory=dict)
     proxy_default: str = ""
+    # MP-9: full fingerprint hardening — opt-in, OFF by default. Kept in
+    # sync with parousia.config.SpatialConfig (the canonical pydantic
+    # config); see the comment there.
+    stealth_enabled: bool = False
 
 # MP-3: suppress the automation-controlled signals on every page. Blink's
 # AutomationControlled feature is disabled at launch (a launch arg, below);
@@ -65,6 +69,100 @@ _WEBDRIVER_SUPPRESSION_SCRIPT = """
       configurable: true,
     });
   } catch (_) { /* page overrode it — best effort */ }
+})();
+
+"""
+
+# ── MP-9 (issue #15): FULL fingerprint hardening — config-gated behind
+# SpatialConfig.stealth_enabled (opt-in, OFF by default). Covers the
+# fingerprint surface the plain suppression script does not touch:
+#   - navigator.webdriver → UNDEFINED (not false — headless detection
+#     commonly tests === undefined after defineProperty tricks)
+#   - window.chrome → present with a minimal realistic shape (runtime et al)
+#   - navigator.plugins/languages → non-empty + realistic
+#   - navigator.platform → desktop value matching the UA ("Win32")
+#   - WebGL UNMASKED_VENDOR/RENDERER → realistic desktop GPU strings (not
+#     headless SwiftShader); all other getParameter calls pass through
+#   - window.history.length → small non-zero
+# Deliberately NOT here (per the brief's scope decision): canvas/audio
+# noise fingerprinting — the listed JS-surface signals only.
+# Verified live against real headless Chromium before shipping.
+_STEALTH_SCRIPT = """
+(() => {
+  try {
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => undefined, configurable: true,
+    });
+  } catch (_) {}
+  try {
+    if (!window.chrome || !window.chrome.runtime) {
+      window.chrome = {
+        runtime: {},
+        loadTimes: function loadTimes() {},
+        csi: function csi() {},
+        app: {},
+      };
+    }
+  } catch (_) {}
+  try {
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const mk = (name) => {
+          const p = {
+            name, filename: 'pdfium.pdf',
+            description: 'Portable Document Format', length: 1,
+          };
+          p[0] = { type: 'application/pdf', suffixes: 'pdf', description: 'PDF' };
+          return p;
+        };
+        const arr = [
+          mk('PDF Viewer'),
+          mk('Chrome PDF Viewer'),
+          mk('Chromium PDF Viewer'),
+          mk('Microsoft Edge PDF Viewer'),
+          mk('WebKit built-in PDF'),
+        ];
+        arr.item = (i) => arr[i] || null;
+        arr.namedItem = (n) => arr.find((p) => p.name === n) || null;
+        return arr;
+      },
+      configurable: true,
+    });
+  } catch (_) {}
+  try {
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en'], configurable: true,
+    });
+  } catch (_) {}
+  try {
+    Object.defineProperty(navigator, 'platform', {
+      get: () => 'Win32', configurable: true,
+    });
+  } catch (_) {}
+  try {
+    const VENDOR = 0x9245;    // UNMASKED_VENDOR_WEBGL
+    const RENDERER = 0x9246;  // UNMASKED_RENDERER_WEBGL
+    const fakeVendor = 'Google Inc. (NVIDIA)';
+    const fakeRenderer =
+      'ANGLE (NVIDIA, NVIDIA GeForce GTX 1050 ' +
+      'Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    const patch = (proto) => {
+      if (!proto || !proto.getParameter) return;
+      const orig = proto.getParameter;
+      proto.getParameter = function getParameter(param) {
+        if (param === VENDOR) return fakeVendor;
+        if (param === RENDERER) return fakeRenderer;
+        return orig.call(this, param);
+      };
+    };
+    patch(window.WebGLRenderingContext && window.WebGLRenderingContext.prototype);
+    patch(window.WebGL2RenderingContext && window.WebGL2RenderingContext.prototype);
+  } catch (_) {}
+  try {
+    Object.defineProperty(window.history, 'length', {
+      get: () => 2, configurable: true,
+    });
+  } catch (_) {}
 })();
 """
 
@@ -340,8 +438,16 @@ class BrowserPoolManager:
         # pages created AFTER it is registered, so close any pre-existing
         # page (the health-check page) and create a fresh one — the agent's
         # persistent page then reports navigator.webdriver === false.
+        # MP-9 (issue #15): full fingerprint hardening is OPT-IN
+        # (config.stealth_enabled, default False). Enabled → the stealth
+        # script (webdriver → undefined, window.chrome, platform, WebGL,
+        # history.length) replaces the plain suppression script. Disabled
+        # (the default) → today's behavior, byte-for-byte.
+        stealth = bool(getattr(self.config, "stealth_enabled", False))
         try:
-            await browser.add_init_script(_WEBDRIVER_SUPPRESSION_SCRIPT)
+            await browser.add_init_script(
+                _STEALTH_SCRIPT if stealth else _WEBDRIVER_SUPPRESSION_SCRIPT
+            )
         except Exception:
             pass  # best effort — the launch flag already did the heavy lift
         for existing in list(getattr(browser, "pages", [])):

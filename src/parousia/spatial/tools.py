@@ -538,7 +538,10 @@ def browse_to_schema() -> dict:
             "Returns the DOM as SDOM (structured DOM) for further processing. "
             "Session cookies persist across calls (persistent context). "
             "On HTTP >= 400 or navigation failure the result carries "
-            "forensics: block_vendor, screenshot_path, dom_snapshot."
+            "forensics: block_vendor, screenshot_path, dom_snapshot. "
+            "MP-9: the result also carries 'stealth' (true/false) — whether "
+            "full fingerprint hardening (config spatial.stealth_enabled) "
+            "was active for this fetch."
         ),
         "inputSchema": {
             "type": "object",
@@ -838,6 +841,15 @@ class SpatialToolHandlers:
                 # MP-4: captcha presence on the landed page (detect, never
                 # solve) — the agent sees it without a second call.
                 "captcha": await self._detect_captcha(page),
+                # MP-9: whether full fingerprint hardening was active for
+                # this fetch (config spatial.stealth_enabled).
+                "stealth": bool(
+                    getattr(
+                        getattr(self.config, "spatial", None),
+                        "stealth_enabled",
+                        False,
+                    )
+                ),
             }
             # MP-6 (part B): a WAF refusal served as a normal HTTP error
             # response (the Empower CloudFront 403) is NOT "site down" —
