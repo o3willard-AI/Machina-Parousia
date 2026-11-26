@@ -224,6 +224,7 @@ class TestMCPRecorderWiring:
             "messages": [],
             "count": 0,
             "unread_only": True,
+            "include_archived": False,
         }
 
     @pytest.mark.asyncio

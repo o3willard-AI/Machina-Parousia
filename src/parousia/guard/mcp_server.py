@@ -151,6 +151,31 @@ def _resolve_agent_id(arguments: dict) -> str:
     return "default"
 
 
+def _triage_bulk(name: str, message_ids: list, agent_id: str, inbox_store) -> dict:
+    """Bulk mark_read/archive with fail-closed agent isolation.
+
+    Every id must resolve to a message owned by ``agent_id``; any missing
+    or foreign id refuses the WHOLE batch (nothing is changed) — the same
+    isolation as the single-message path, never a partial success that
+    would silently drop a cross-agent refusal. Returns
+    ``{"marked": n, "count": n}`` / ``{"archived": n, "count": n}``, or an
+    ``{"error": ...}`` dict on refusal.
+    """
+    owned = []
+    for mid in message_ids:
+        msg = inbox_store.get_message(mid)
+        if msg is None:
+            return {"error": "message not found"}
+        if msg.agent_id != agent_id:
+            return {"error": "not your message"}
+        owned.append(mid)
+    if name == "mark_read":
+        n = inbox_store.mark_read_bulk(agent_id, owned)
+        return {"marked": n, "count": n}
+    n = inbox_store.archive_bulk(agent_id, owned)
+    return {"archived": n, "count": n}
+
+
 def _build_server() -> tuple[Server, AccountStore]:
     """Create and configure the MCP server with email + temporal tools.
 
@@ -279,6 +304,11 @@ def _build_server() -> tuple[Server, AccountStore]:
                         "description": "Only return unread messages",
                         "default": True,
                     },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Include archived messages (default false — archived mail is excluded so archiving shrinks the listing)",
+                        "default": False,
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Maximum messages to return",
@@ -339,6 +369,24 @@ def _build_server() -> tuple[Server, AccountStore]:
             ("archive", "Archive", "archived"),
             ("delete", "Delete", "deleted"),
         ):
+            # MP-10: mark_read / archive accept an optional bulk message_ids
+            # array so a watcher can triage a batch in ONE round trip.
+            # delete stays single-message only (batching a destructive op
+            # is deliberately out of scope).
+            _props: dict[str, Any] = {
+                "message_id": {
+                    "type": "string",
+                    "description": "Message ID from check_inbox",
+                },
+            }
+            _required = ["message_id"]
+            if _triage_name in ("mark_read", "archive"):
+                _props["message_ids"] = {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Bulk: message IDs to triage in one call (alternative to message_id)",
+                }
+                _required = []
             tools.append(Tool(
                 name=_triage_name,
                 description=(
@@ -349,13 +397,8 @@ def _build_server() -> tuple[Server, AccountStore]:
                 ),
                 inputSchema={
                     "type": "object",
-                    "properties": {
-                        "message_id": {
-                            "type": "string",
-                            "description": "Message ID from check_inbox",
-                        },
-                    },
-                    "required": ["message_id"],
+                    "properties": _props,
+                    "required": _required,
                 },
             ))
         return tools
@@ -416,9 +459,11 @@ def _build_server() -> tuple[Server, AccountStore]:
         # ── Story F: check_inbox ────────────────
         if name == "check_inbox":
             unread_only = arguments.get("unread_only", True)
+            include_archived = arguments.get("include_archived", False)
             limit_val = arguments.get("limit", 10)
             messages = inbox_store.list_messages(
-                agent_id, limit=limit_val, unread_only=unread_only
+                agent_id, limit=limit_val, unread_only=unread_only,
+                include_archived=include_archived,
             )
             result_data = []
             for msg in messages:
@@ -431,7 +476,7 @@ def _build_server() -> tuple[Server, AccountStore]:
                     "archived": msg.archived,
                     "body_preview": msg.body_text[:200],
                 })
-            result_dict = {"messages": result_data, "count": len(result_data), "unread_only": unread_only}
+            result_dict = {"messages": result_data, "count": len(result_data), "unread_only": unread_only, "include_archived": include_archived}
             result = [TextContent(
                 type="text",
                 text=json.dumps(result_dict),
@@ -485,8 +530,19 @@ def _build_server() -> tuple[Server, AccountStore]:
         # same SSE-account scoping check_inbox/read_message use.
         if name in ("mark_read", "archive", "delete"):
             message_id = arguments.get("message_id")
-            if not message_id:
-                result_dict = {"error": "message_id is required"}
+            message_ids = arguments.get("message_ids")
+
+            # MP-10: bulk path — mark_read/archive accept a message_ids
+            # array. Every id must resolve to a message owned by THIS agent
+            # (any foreign or missing id refuses the whole batch, nothing
+            # changed). delete stays single-message only.
+            if message_ids is not None:
+                if name == "delete":
+                    result_dict = {"error": "message_ids is not supported for delete"}
+                else:
+                    result_dict = _triage_bulk(name, message_ids, agent_id, inbox_store)
+            elif not message_id:
+                result_dict = {"error": "message_id or message_ids is required"}
             else:
                 msg = inbox_store.get_message(message_id)
                 if msg is None:

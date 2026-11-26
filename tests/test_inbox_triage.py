@@ -308,5 +308,122 @@ class TestRegistry:
             return {t.name: t.inputSchema for t in listed.root.tools}
 
         schemas = asyncio.run(run())
-        for tool in ("mark_read", "archive", "delete"):
-            assert schemas[tool]["required"] == ["message_id"], tool
+        # delete stays single-message: message_id is required.
+        assert schemas["delete"]["required"] == ["message_id"]
+        # mark_read / archive accept message_id OR a bulk message_ids array;
+        # neither is required at the schema layer — dispatch validates.
+        for tool in ("mark_read", "archive"):
+            assert schemas[tool]["required"] == [], tool
+            assert set(schemas[tool]["properties"]) == {"message_id", "message_ids"}, tool
+
+
+# ── MP-10: bulk mark_read / archive (message_ids array) ───────────
+
+
+class TestTriageBulk:
+    def test_bulk_mark_read_marks_all_own_rows(self, as_ricky):
+        server, inbox, _config = as_ricky
+        inbox.store_message(_msg("ricky", "msg-ricky-2"))
+        result = _dispatch(
+            server, "mark_read", {"message_ids": ["msg-ricky-1", "msg-ricky-2"]}
+        )
+        assert result == {"marked": 2, "count": 2}, result
+        assert inbox.get_message("msg-ricky-1").read is True
+        assert inbox.get_message("msg-ricky-2").read is True
+
+    def test_bulk_archive_archives_all_own_rows(self, as_ricky):
+        server, inbox, _config = as_ricky
+        inbox.store_message(_msg("ricky", "msg-ricky-2"))
+        result = _dispatch(
+            server, "archive", {"message_ids": ["msg-ricky-1", "msg-ricky-2"]}
+        )
+        assert result == {"archived": 2, "count": 2}, result
+        assert inbox.get_message("msg-ricky-1").archived is True
+        assert inbox.get_message("msg-ricky-2").archived is True
+
+    def test_bulk_refuses_whole_batch_on_foreign_id(self, as_ricky):
+        """One foreign id refuses the ENTIRE batch — the caller's own row in
+        the same batch is left untouched (no partial success)."""
+        server, inbox, _config = as_ricky
+        inbox.store_message(_msg("ricky", "msg-ricky-2"))
+        result = _dispatch(
+            server, "mark_read", {"message_ids": ["msg-ricky-1", "msg-hermes-1"]}
+        )
+        assert result == {"error": "not your message"}, result
+        assert inbox.get_message("msg-ricky-1").read is False
+        assert inbox.get_message("msg-hermes-1").read is False
+
+    def test_bulk_refuses_on_missing_id(self, as_ricky):
+        server, inbox, _config = as_ricky
+        result = _dispatch(
+            server, "archive", {"message_ids": ["msg-ricky-1", "no-such-id"]}
+        )
+        assert result == {"error": "message not found"}, result
+        assert inbox.get_message("msg-ricky-1").archived is False
+
+    def test_bulk_not_supported_for_delete(self, as_ricky):
+        """delete stays single-message: its schema still requires message_id,
+        so a bare message_ids array is rejected at the schema layer (prose
+        naming message_id — never a 500, never a silent delete)."""
+        server, inbox, _config = as_ricky
+        raw = _dispatch_raw(server, "delete", {"message_ids": ["msg-ricky-1"]})
+        assert "message_id" in raw, raw
+        assert inbox.get_message("msg-ricky-1") is not None
+
+    def test_delete_with_both_ids_refuses_bulk(self, as_ricky):
+        """If a caller passes BOTH message_id and message_ids to delete,
+        dispatch refuses the bulk (and does not delete)."""
+        server, inbox, _config = as_ricky
+        result = _dispatch(
+            server, "delete", {"message_id": "msg-ricky-1", "message_ids": ["msg-ricky-1"]}
+        )
+        assert result == {"error": "message_ids is not supported for delete"}, result
+        assert inbox.get_message("msg-ricky-1") is not None
+
+
+class TestStoreBulk:
+    def test_mark_read_bulk_scoped_to_agent(self, inbox):
+        inbox.store_message(_msg("agent-x", "m-x-1"))
+        inbox.store_message(_msg("agent-x", "m-x-2"))
+        inbox.store_message(_msg("agent-y", "m-y-1"))
+        n = inbox.mark_read_bulk("agent-x", ["m-x-1", "m-x-2", "m-y-1"])
+        assert n == 2  # agent-y's row excluded by the agent_id predicate
+        assert inbox.get_message("m-x-1").read is True
+        assert inbox.get_message("m-x-2").read is True
+        assert inbox.get_message("m-y-1").read is False
+
+    def test_archive_bulk_scoped_to_agent(self, inbox):
+        inbox.store_message(_msg("agent-x", "m-x-1"))
+        inbox.store_message(_msg("agent-x", "m-x-2"))
+        n = inbox.archive_bulk("agent-x", ["m-x-1", "m-x-2"])
+        assert n == 2
+        assert inbox.get_message("m-x-1").archived is True
+        assert inbox.get_message("m-x-2").archived is True
+
+    def test_bulk_empty_list_returns_zero(self, inbox):
+        assert inbox.mark_read_bulk("agent-x", []) == 0
+        assert inbox.archive_bulk("agent-x", []) == 0
+
+
+# ── MP-10: check_inbox include_archived ───────────────────────────
+
+
+class TestCheckInboxArchived:
+    def test_check_inbox_excludes_archived_by_default(self, as_ricky):
+        server, inbox, _config = as_ricky
+        inbox.store_message(_msg("ricky", "msg-ricky-arch", archived=True))
+        result = _dispatch(server, "check_inbox", {"unread_only": False})
+        ids = {m["id"] for m in result["messages"]}
+        assert "msg-ricky-1" in ids
+        assert "msg-ricky-arch" not in ids  # archived excluded by default
+        assert result["include_archived"] is False
+
+    def test_check_inbox_include_archived_true(self, as_ricky):
+        server, inbox, _config = as_ricky
+        inbox.store_message(_msg("ricky", "msg-ricky-arch", archived=True))
+        result = _dispatch(
+            server, "check_inbox", {"unread_only": False, "include_archived": True}
+        )
+        ids = {m["id"] for m in result["messages"]}
+        assert "msg-ricky-arch" in ids
+        assert result["include_archived"] is True

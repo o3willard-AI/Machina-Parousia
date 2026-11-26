@@ -101,3 +101,40 @@ def test_count_unread(test_inbox):
     store.store_message(make_message(id="r1", read=True))
 
     assert store.count_unread("test-agent") == 2
+
+
+def test_list_messages_excludes_archived_by_default_when_false(test_inbox):
+    """include_archived=False drops archived rows from the listing."""
+    store = test_inbox
+    store.store_message(make_message(id="live", archived=False))
+    store.store_message(make_message(id="archived", archived=True))
+
+    messages = store.list_messages(
+        "test-agent", limit=10, unread_only=False, include_archived=False
+    )
+    assert [m.id for m in messages] == ["live"]
+
+
+def test_list_messages_include_archived_true_keeps_them(test_inbox):
+    """include_archived=True (the store default) returns archived rows too."""
+    store = test_inbox
+    store.store_message(make_message(id="live", archived=False))
+    store.store_message(make_message(id="archived", archived=True))
+
+    messages = store.list_messages(
+        "test-agent", limit=10, unread_only=False, include_archived=True
+    )
+    assert {m.id for m in messages} == {"live", "archived"}
+
+
+def test_list_messages_archived_and_unread_only_interact(test_inbox):
+    """An archived-but-unread row is excluded by include_archived=False
+    even though unread_only would otherwise let it through."""
+    store = test_inbox
+    store.store_message(make_message(id="archived-unread", read=False, archived=True))
+    store.store_message(make_message(id="live-unread", read=False, archived=False))
+
+    messages = store.list_messages(
+        "test-agent", limit=10, unread_only=True, include_archived=False
+    )
+    assert [m.id for m in messages] == ["live-unread"]

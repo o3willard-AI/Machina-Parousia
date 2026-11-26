@@ -104,8 +104,13 @@ class InboxStore:
             )
         return None
     
-    def list_messages(self, agent_id: str, limit: int = 50, offset: int = 0, unread_only: bool = False) -> List[InboxMessage]:
-        """List messages for an agent."""
+    def list_messages(self, agent_id: str, limit: int = 50, offset: int = 0, unread_only: bool = False, include_archived: bool = True) -> List[InboxMessage]:
+        """List messages for an agent.
+
+        ``include_archived=False`` excludes archived rows so archive() is an
+        observable view state (the default check_inbox listing shrinks as a
+        watcher archives handled mail, instead of re-listing it forever).
+        """
         conn = sqlite3.connect(self.db_path)
         
         query = "SELECT id, agent_id, sender, recipient, subject, body_text, body_html, received_at, read, archived FROM inbox_messages WHERE agent_id = ?"
@@ -113,6 +118,8 @@ class InboxStore:
         
         if unread_only:
             query += " AND read = 0"
+        if not include_archived:
+            query += " AND archived = 0"
             
         query += " ORDER BY received_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -160,6 +167,41 @@ class InboxStore:
         rows_affected = cursor.rowcount
         conn.close()
         return rows_affected > 0
+
+    def mark_read_bulk(self, agent_id: str, message_ids: List[str]) -> int:
+        """Mark many messages read in one query, scoped to ``agent_id``.
+
+        The ``agent_id`` predicate is defense-in-depth: even if the caller
+        passed a foreign id, the UPDATE only touches rows it owns. Returns
+        the number of rows changed (0 for an empty/foreign id list).
+        """
+        if not message_ids:
+            return 0
+        placeholders = ",".join("?" * len(message_ids))
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute(
+            f"UPDATE inbox_messages SET read = 1 WHERE agent_id = ? AND id IN ({placeholders})",
+            [agent_id, *message_ids],
+        )
+        conn.commit()
+        rows_affected = cursor.rowcount
+        conn.close()
+        return rows_affected
+
+    def archive_bulk(self, agent_id: str, message_ids: List[str]) -> int:
+        """Archive many messages in one query, scoped to ``agent_id``."""
+        if not message_ids:
+            return 0
+        placeholders = ",".join("?" * len(message_ids))
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute(
+            f"UPDATE inbox_messages SET archived = 1 WHERE agent_id = ? AND id IN ({placeholders})",
+            [agent_id, *message_ids],
+        )
+        conn.commit()
+        rows_affected = cursor.rowcount
+        conn.close()
+        return rows_affected
 
     def delete(self, message_id: str) -> bool:
         """Delete a message by ID (MP-5). Returns whether a row was removed."""
