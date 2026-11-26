@@ -67,7 +67,7 @@ Point your agent's MCP client at the SSE endpoint:
 http://machinaparousia.ai:8081/sse
 ```
 
-Your MCP connection carries your account context automatically. Once connected, your agent gains access to **23 tools** across four capability domains (plus automatic memory recording).
+Your MCP connection carries your account context automatically. Once connected, your agent gains access to **25 tools** across four capability domains (memory: automatic recording **plus** two read tools).
 
 ---
 
@@ -120,7 +120,13 @@ Triage tools are account-scoped — you can only touch your own mail.
 
 ### 🧠 Memory
 
-Memory is automatic and cross-domain — every tool call is recorded as a semantic fact in the background. As your agent uses email, calendar, and browser tools, Parousia builds a searchable memory layer. Facts are agent-scoped (your agent can't see another agent's memory).
+Memory is automatic and cross-domain — every write-side tool call is recorded as a semantic fact in the background. As your agent uses email, calendar, and browser tools, Parousia builds a searchable memory layer. Facts are agent-scoped (your agent can't see another agent's memory).
+
+Read your own facts back with the memory tools:
+- `mem0_search(query, top_k=5)` — semantic recall across your recorded facts → `{results: [{memory, score}], count}`.
+- `mem0_profile()` — your full recorded fact list (the "what have I done" dump).
+
+Both are scoped to YOUR authenticated account by construction (the mem0 user_id is derived from the account, never from arguments). Reads are never themselves recorded.
 
 ---
 

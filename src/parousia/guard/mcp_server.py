@@ -23,6 +23,9 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 from parousia.memory.recorder import MemoryRecorder
+# MP-11: the read side — shares the recorder's lazy mem0 singleton.
+from parousia.memory.query import MemoryQuery
+from parousia.memory.tools import ALL_MEMORY_SCHEMAS, MemoryQueryHandlers
 from starlette.applications import Starlette
 from starlette.responses import Response
 from starlette.routing import Mount, Route
@@ -254,6 +257,11 @@ def _build_server() -> tuple[Server, AccountStore]:
 
     # Initialize memory recorder for tool call logging
     memory_recorder = MemoryRecorder()
+    # MP-11: the read side — MemoryQuery SHARES the recorder's lazy
+    # mem0.Memory singleton (one embedder/Qdrant client for the server);
+    # user_id is derived from the authenticated agent at dispatch.
+    memory_query = MemoryQuery(memory_recorder)
+    memory_query_handlers = MemoryQueryHandlers(memory_query)
 
     # ── Phase 1 + Phase 2 tool listing ───────────────
 
@@ -287,6 +295,9 @@ def _build_server() -> tuple[Server, AccountStore]:
             tools.append(Tool(**schema))
         # MP-8: TOTP authenticator tools (issue #11 workstream 3)
         for schema in ALL_TOTP_SCHEMAS:
+            tools.append(Tool(**schema))
+        # MP-11: memory read tools (issue #13 — mem0_search / mem0_profile)
+        for schema in ALL_MEMORY_SCHEMAS:
             tools.append(Tool(**schema))
         # Add inbox tool (Story F)
         tools.append(Tool(
@@ -621,6 +632,20 @@ def _build_server() -> tuple[Server, AccountStore]:
                 memory_recorder.record_tool_call(name, arguments, json.loads(result_str), agent_id, sponsor=sponsor)
             except Exception:
                 pass
+            return result
+
+        # ── MP-11: memory read tools (issue #13) ─────────────
+        # Account-scoped by construction: agent_id above is the
+        # authenticated account (SSE session) or the stdio sentinel, and
+        # the mem0 user_id is derived from it INSIDE the handlers — the
+        # tool schemas carry no user_id/agent_id argument, so there is no
+        # path from tool input into another agent's memory.
+        if name in ("mem0_search", "mem0_profile"):
+            result_str = await memory_query_handlers.dispatch(name, arguments, agent_id)
+            result = [TextContent(type="text", text=result_str)]
+            # No fact recorded: a memory READ is never itself recorded —
+            # no re-entrant record_tool_call from the read path (also
+            # keeps the read loop from feeding its own output back in).
             return result
 
         # ── Unknown tool ───────────────────────────
