@@ -38,6 +38,8 @@ from parousia.spatial.serializer import SpatialSerializer
 from parousia.spatial.tools import ALL_SPATIAL_SCHEMAS, SpatialToolHandlers
 from parousia.temporal.db import TemporalDB
 from parousia.temporal.tools import ALL_TEMPORAL_SCHEMAS, TemporalToolHandlers
+from parousia.totp.store import TOTPStore
+from parousia.totp.tools import ALL_TOTP_SCHEMAS, TotpHandlers
 from parousia.vault.credential_store import CredentialStore
 
 logger = logging.getLogger("parousia.mcp")
@@ -196,6 +198,20 @@ def _build_server() -> tuple[Server, AccountStore]:
         config, browser_pool, spatial_serializer, credential_store=credential_store
     )
 
+    # MP-8: server-side TOTP vault (RFC 6238). Same unwritable-path fallback
+    # as the credential store — the tools then answer "store unavailable"
+    # rather than failing server startup (tests, non-root).
+    try:
+        totp_store = TOTPStore(
+            config.totp_store.db_path,
+            config.totp_store.key_path,
+        )
+        totp_store.connect()
+    except Exception:
+        totp_store = TOTPStore(":memory:", str(Path(tempfile.gettempdir()) / "parousia-totp.key"))
+        totp_store.connect()
+    totp_handlers = TotpHandlers(totp_store)
+
     server = Server("parousia-guard-mcp")
 
     # Initialize account store for MCP auth (Story D)
@@ -243,6 +259,9 @@ def _build_server() -> tuple[Server, AccountStore]:
             tools.append(Tool(**schema))
         # Add spatial tools (Phase 3)
         for schema in ALL_SPATIAL_SCHEMAS:
+            tools.append(Tool(**schema))
+        # MP-8: TOTP authenticator tools (issue #11 workstream 3)
+        for schema in ALL_TOTP_SCHEMAS:
             tools.append(Tool(**schema))
         # Add inbox tool (Story F)
         tools.append(Tool(
@@ -511,6 +530,19 @@ def _build_server() -> tuple[Server, AccountStore]:
             # confirmation mail is not a presence fact; a found/timeout
             # summary alone would be noise — and the helper's message
             # content must never flow into the memory layer unfiltered).
+            return result
+
+        # ── MP-8: TOTP authenticator tools ─────────────
+        # Account-scoped like the email tools: agent_id above is the
+        # authenticated account (SSE session) or the stdio sentinel;
+        # the store keys everything by agent_id, so an agent can only
+        # enroll/read/list/remove its OWN enrollments.
+        if name in ("enroll_totp", "get_totp_code", "list_totp", "remove_totp"):
+            result_str = await totp_handlers.dispatch(name, arguments, agent_id)
+            result = [TextContent(type="text", text=result_str)]
+            # No fact recorded: the results describe 2FA secrets/codes —
+            # never recorded into any memory layer (and the payloads never
+            # carry the secret anyway, by construction).
             return result
 
         # ── Phase 2: temporal tools ────────────────
