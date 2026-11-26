@@ -95,8 +95,17 @@ class SpatialConfig(BaseModel):
     # browse_to/interact; omitted or "" means DIRECT egress, always.
     # `proxy_servers`/`proxy_default` above remain the operator-side
     # per-agent mapping (unchanged, MP-3). "tor" is a reserved name —
-    # chunk 2 will register it; until then it errors as unknown. ──
+    # registered by MP-10b (chunk 2) as the managed Tor transport
+    # (see tor_enabled below). ──
     proxies: dict[str, str] = Field(default_factory=dict)
+    # ── MP-10b (issue #11 ws1, chunk 2 of 3): managed Tor transport —
+    # the self-hosted free-fallback, registered as the reserved name
+    # "tor" in the agent-called selection. OFF by default; NEVER
+    # auto-started (an explicit proxy="tor" + tor_enabled=true is the
+    # only path that launches it). Failures are loud errors, never a
+    # silent direct-egress fallback. SOCKS listener on loopback only. ──
+    tor_enabled: bool = False
+    tor_socks_port: int = 9050
     # ── MP-9: full fingerprint hardening ("stealth") is OPT-IN and OFF by
     # default (issue #15) — ordinary browsing stays exactly as today. When
     # enabled, the pool injects the stealth init script (webdriver →

@@ -6,8 +6,9 @@ Covers the [DONE] gate:
   the OPT-IN gate; direct egress is the default and stays the default;
 - a named proxy (from the operator's ``spatial.proxies`` menu) resolves
   to its URL and is used for THAT request's browser context;
-- an unknown name errors clearly with the available list ("tor" is
-  reserved for chunk 2 — it must error as unknown until then);
+- an unknown name errors clearly with the available list (MP-10b
+  supersedes the old reserved-unknown semantics: ``"tor"`` now resolves
+  via the managed Tor transport — see tests/test_tor_transport.py);
 - the config ``spatial.proxies`` roundtrips through YAML;
 - the operator mapping (``proxy_servers``/``proxy_default``, MP-3) is
   intact for the DEFAULT path;
@@ -136,14 +137,25 @@ class TestResolveProxy:
             "error": "unknown proxy name 'nope'; available: mobile-1, residential-1"
         }
 
-    def test_tor_is_reserved_unknown(self):
-        """'tor' is chunk 2's name — until it is registered there it
-        errors as an unknown name, exactly like any other."""
-        handlers, _ = _handlers(_cfg(PROXIES))
+    def test_tor_is_reserved_for_the_managed_transport(self):
+        """MP-10b: 'tor' is no longer an unknown name — it is the reserved
+        name for the managed Tor transport. Disabled → the explicit
+        'Tor is not enabled' error (still never direct, never unknown)."""
+        handlers, pool = _handlers(_cfg(PROXIES))
         url, err = handlers._resolve_proxy("tor")
         assert url == ""
-        assert "unknown proxy name 'tor'" in err["error"]
-        assert "available: mobile-1, residential-1" in err["error"]
+        assert err == {
+            "error": "Tor is not enabled (set spatial.tor_enabled=true) to use proxy='tor'"
+        }
+        pool.tor_manager.assert_not_called()  # never touched when disabled
+        # And a menu entry named 'tor' cannot shadow the reserved name.
+        handlers2, pool2 = _handlers(
+            _cfg({"proxies": {"tor": "http://not-the-managed-tor:1"}})
+        )
+        url2, err2 = handlers2._resolve_proxy("tor")
+        assert url2 == ""
+        assert "Tor is not enabled" in err2["error"]
+        pool2.get_browser.assert_not_awaited()
 
     def test_empty_registry_lists_none(self):
         handlers, _ = _handlers(_cfg())
@@ -208,10 +220,14 @@ class TestHandlerSelection:
         assert result == {"error": "unknown proxy name 'nope'; available: mobile-1, residential-1"}
         pool.get_browser.assert_not_awaited()
 
-    def test_browse_to_tor_errors_until_chunk2(self):
+    def test_browse_to_tor_disabled_errors_before_pool(self):
+        """MP-10b: tor is registered now — disabled → the explicit
+        'Tor is not enabled' error, before any pool call."""
         handlers, pool = _handlers(_cfg(PROXIES))
         result = _dispatch(handlers, "browse_to", {"url": "https://example.com", "proxy": "tor"})
-        assert "unknown proxy name 'tor'" in result["error"]
+        assert result == {
+            "error": "Tor is not enabled (set spatial.tor_enabled=true) to use proxy='tor'"
+        }
         pool.get_browser.assert_not_awaited()
 
     def test_interact_omitted_proxy_never_sets_proxy(self):

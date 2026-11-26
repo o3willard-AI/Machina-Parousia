@@ -18,6 +18,9 @@ from typing import Any, Optional
 from parousia.config import ParousiaConfig
 from parousia.spatial.browser_pool import BrowserPoolManager
 from parousia.spatial.serializer import SpatialSerializer
+# MP-10b: the managed Tor transport's error base (fail-loud, never a
+# silent direct-egress fallback — see _resolve_tor).
+from parousia.spatial.tor import TorError
 from parousia.vault.credential_store import CredentialStore, normalize_origin
 
 logger = logging.getLogger("parousia.spatial.tools")
@@ -561,8 +564,8 @@ def browse_to_schema() -> dict:
                         "named proxy is used for this request's browser "
                         "context (a separate persistent context per "
                         "(agent, proxy)). Unknown names error with the "
-                        "available list. 'tor' is reserved for a later "
-                        "chunk and is not yet a valid name."
+                        "available list. 'tor' selects the managed Tor transport "
+                        "(requires spatial.tor_enabled=true; fail-loud if unavailable)."
                     ),
                 },
                 "url": {"type": "string", "description": "URL to navigate to"},
@@ -606,7 +609,10 @@ def interact_schema() -> dict:
                         "named proxy targets this request's browser context "
                         "(a separate persistent context per (agent, proxy)) "
                         "— the interaction runs on that transport's page. "
-                        "Unknown names error with the available list."
+                        "Unknown names error with the available list. "
+                        "'tor' selects the managed Tor transport "
+                        "(requires spatial.tor_enabled=true; fail-loud if "
+                        "unavailable)."
                     ),
                 },
                 "id": {"type": "string", "description": "Element ID to interact with"},
@@ -828,12 +834,49 @@ class SpatialToolHandlers:
         """
         name = (name or "").strip()
         if not name:
-            return "", None
+            return "", None  # DIRECT egress, always (the opt-in gate)
+        # MP-10b: the reserved name — Tor is handled BEFORE the named
+        # registry (an operator "tor" menu entry can't shadow the
+        # managed transport). Never resolves to direct egress.
+        if name == "tor":
+            return self._resolve_tor()
         proxies = getattr(getattr(self.config, "spatial", None), "proxies", None) or {}
         if name not in proxies:
             available = ", ".join(sorted(proxies)) if proxies else "(none configured)"
             return "", {"error": f"unknown proxy name '{name}'; available: {available}"}
         return str(proxies[name]), None
+
+    def _resolve_tor(self):
+        """MP-10b (issue #11 ws1, chunk 2 of 3): the managed Tor transport.
+
+        The reserved ``"tor"`` name. OPT-IN (``spatial.tor_enabled``),
+        AGENT-CALLED (only reachable via an explicit ``proxy="tor"``),
+        FAIL-LOUD (every failure is a clear error — Tor is never
+        silently skipped: the agent must not believe it is proxied when
+        it isn't, and ``"tor"`` must NEVER resolve to direct egress).
+
+        Returns ``(socks5_url, error_dict)``; exactly one is non-empty.
+        """
+        cfg = getattr(self.config, "spatial", None)
+        if not bool(getattr(cfg, "tor_enabled", False)):
+            return "", {
+                "error": (
+                    "Tor is not enabled (set spatial.tor_enabled=true) "
+                    "to use proxy='tor'"
+                )
+            }
+        try:
+            url = self.browser_pool.tor_manager().ensure_running()
+        except TorError as exc:
+            return "", {"error": f"Tor transport unavailable: {exc}"}
+        if not url:
+            # Belt-and-braces: "tor" NEVER resolves to a direct/empty
+            # override, even if the transport returned nothing.
+            return "", {
+                "error": "Tor transport unavailable: no SOCKS URL "
+                "(refusing direct egress)"
+            }
+        return url, None
 
     async def _egress_identity(self, page: Any, agent_id: str, proxy_name: str = "") -> dict:
         """MP-3 (part A): the egress identity a browse result reports.
