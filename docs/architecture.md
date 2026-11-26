@@ -31,7 +31,7 @@ How Parousia's components fit together and what happens when things happen.
                    │  ├──────────────┤
                    │  │  MCP Server  │  Stdio (spawned per-agent)
                    │  │  (stdio/SSE) │  SSE (:8081) for remote agents
-                   │  │              │  18 tools (email ×7, temp ×6, spatial ×5)
+                   │  │              │  23 tools (email ×7, temp ×6, spatial ×6, totp ×4)
                    │  ├──────────────┤
                    │  │  Auth        │  bcrypt API key validation
                    │  │  Middleware  │  AccountStore → tier/permissions

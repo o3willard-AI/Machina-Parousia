@@ -73,6 +73,36 @@ def _effective_egress_ip() -> str:
         return "unknown"
 
 
+# ── MP-10c (issue #11 ws1, chunk 3 of 3): egress verification ────
+#
+# The IP-echo endpoint check_egress_ip navigates to (plain-text body —
+# the public IP the request presented). Read-only verification of the
+# agent-called transport; nothing is submitted or stored.
+IP_ECHO_URL = "https://api.ipify.org"
+
+# RFC 5737 says 203.0.113.0/24 is TEST-NET-3 — never routed — so the
+# default above keeps test fixtures honest while this regex accepts any
+# well-formed IPv4 (octets 0-255) or plausibly-shaped IPv6 body.
+_IPV4_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+_IPV6_ISH_RE = re.compile(r"[0-9A-Fa-f:]+:{1,2}[0-9A-Fa-f:]*|[0-9A-Fa-f]+(?::[0-9A-Fa-f]+)+:?")
+
+
+def _looks_like_ip(text: str) -> bool:
+    """Lightweight sanity check for an IP-echo response body (IPv4 or IPv6).
+
+    The echo endpoint returns a bare IP string; anything else (an HTML
+    error page, a captive portal, an empty body) must NOT be reported as
+    an egress IP — check_egress_ip fails loud instead.
+    """
+    s = (text or "").strip()
+    if not s or len(s) > 45 or " " in s:
+        return False
+    m4 = _IPV4_RE.fullmatch(s)
+    if m4:
+        return all(0 <= int(part) < 256 for part in s.split("."))
+    return bool(_IPV6_ISH_RE.fullmatch(s)) and s.count(":") >= 2
+
+
 # ── MP-4: form introspection + captcha detection (issue #18) ──────
 
 
@@ -716,12 +746,52 @@ def dump_form_schema() -> dict:
     }
 
 
+def check_egress_ip_schema() -> dict:
+    """MP-10c: read-only egress verification tool (issue #11 ws1)."""
+    return {
+        "name": "check_egress_ip",
+        "description": (
+            "MP-10c: read-only verification of the agent-called transport. "
+            "Navigates to an IP-echo endpoint (https://api.ipify.org) and "
+            "returns the ACTUAL public IP the request presented, so an agent "
+            "can confirm a chosen transport (e.g. proxy='tor') is genuinely "
+            "active before attempting signup. The 'proxy' argument follows "
+            "the SAME agent-called semantics as browse_to: '' or omitted = "
+            "DIRECT egress (the default, and always the default); a name "
+            "from the operator's spatial.proxies menu; 'tor' for the managed "
+            "Tor transport (requires spatial.tor_enabled=true, fail-loud). "
+            "Returns {ip, proxy} — the transport by NAME, never the resolved "
+            "URL (registry URLs may embed credentials). Read-only: nothing is "
+            "submitted, nothing is stored; the echo fetch is the only traffic."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "proxy": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Optional named transport to verify — same semantics "
+                        "as browse_to's proxy argument ('' = direct)."
+                    ),
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Echo navigation timeout in milliseconds. Default: 30000.",
+                },
+            },
+        },
+    }
+
+
 ALL_SPATIAL_SCHEMAS = [
     browse_to_schema(),
     interact_schema(),
     extract_page_state_schema(),
     fill_credentials_schema(),
     dump_form_schema(),
+    # MP-10c: the 6th spatial tool — read-only egress verification.
+    check_egress_ip_schema(),
 ]
 
 
@@ -754,6 +824,8 @@ class SpatialToolHandlers:
             "extract_page_state": self._handle_extract_page_state,
             "fill_credentials": self._handle_fill_credentials,
             "dump_form": self._handle_dump_form,
+            # MP-10c: read-only egress verification of the called transport.
+            "check_egress_ip": self._handle_check_egress_ip,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -877,6 +949,53 @@ class SpatialToolHandlers:
                 "(refusing direct egress)"
             }
         return url, None
+
+    async def _handle_check_egress_ip(self, args: dict, agent_id: str) -> dict:
+        """MP-10c (issue #11 ws1, chunk 3 of 3): read-only egress verification.
+
+        Navigates the agent's (or the named transport's) persistent page to
+        the IP-echo endpoint and reads back the ACTUAL public IP the request
+        presented — so the agent can confirm a chosen transport (e.g.
+        proxy="tor") is genuinely active before attempting signup.
+
+        ``proxy`` follows the SAME agent-called semantics as browse_to:
+        "" or omitted = the agent's DEFAULT context (direct egress unless
+        the operator mapped a proxy); a name from ``spatial.proxies``;
+        "tor" for the managed Tor transport. Resolution failures surface
+        the same error (reused ``_resolve_proxy`` — never a silent direct
+        fallback). Read-only: the echo fetch is the only traffic, nothing
+        is submitted or stored. The result reports the transport by NAME,
+        never the resolved URL (registry URLs may embed credentials).
+        """
+        proxy_name = (args.get("proxy") or "").strip()
+        proxy_url, proxy_error = self._resolve_proxy(proxy_name)
+        if proxy_error:
+            return proxy_error
+        timeout_ms = args.get("timeout_ms", 30000)
+
+        browser = await self.browser_pool.get_browser(agent_id, override_proxy=proxy_url)
+        if not browser:
+            return {"error": f"Unable to get browser for agent {agent_id}"}
+        page = browser.page
+        try:
+            await page.goto(IP_ECHO_URL, timeout=timeout_ms)
+            body = await page.evaluate(
+                "() => (document.body && document.body.innerText || '')"
+            )
+        except Exception as exc:
+            return {"error": f"IP echo fetch failed: {exc}"}
+        if not _looks_like_ip(body):
+            return {
+                "error": (
+                    "IP echo returned unexpected content "
+                    f"(not an IP address): {str(body)[:60]!r}"
+                )
+            }
+        return {
+            "ip": (body or "").strip(),
+            # By NAME, never the URL (may embed credentials).
+            "proxy": proxy_name,
+        }
 
     async def _egress_identity(self, page: Any, agent_id: str, proxy_name: str = "") -> dict:
         """MP-3 (part A): the egress identity a browse result reports.

@@ -49,7 +49,7 @@ Full provisioning walkthrough: **[docs/getting-started.md](docs/getting-started.
 
 ## MCP Tools
 
-Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **18 tools** are available through a single MCP session, plus the automatic memory layer (no tools — recording happens in the background).
+Agents connect to Parousia via MCP stdio transport — each agent spawns `parousia-guard serve --mcp` as a subprocess. All **23 tools** are available through a single MCP session, plus the automatic memory layer (no tools — recording happens in the background).
 
 ### 📧 Email
 
@@ -85,6 +85,7 @@ Triage tools are **account-scoped**: they only ever touch messages stored for th
 | `extract_page_state` | Extract current page as SDOM. 3 modes: `full`, `changes`, `context_only`. |
 | `fill_credentials` | Fill a stored credential into a login form on the current origin (encrypted-at-rest vault; origin-bound; the agent never sees the secret). |
 | `dump_form` | Introspect a form's controls — per-field type/label/options, with captcha detection. Password values are never returned. |
+| `check_egress_ip` | Read-only verification of the agent-called transport: returns the actual egress IP (`{ip, proxy}` — transport by name) via an IP-echo fetch. |
 
 Session cookies persist across calls (persistent per-agent Chromium profile). On a failed/refused `browse_to`/`interact`, the result carries **failure forensics** — a `block_vendor` classification (CloudFront/Cloudflare/Akamai), a screenshot path, and a DOM snapshot — so agents can tell "the tool is broken" from "the site is refusing us".
 
@@ -171,7 +172,7 @@ Full component interactions and request lifecycle: **[docs/architecture.md](docs
 | [Onboarding](ONBOARDING.md) | How an agent (or its sponsor) creates an account and connects via MCP |
 | [Email Guide](docs/capabilities/email.md) | All 7 email tools with request/response examples |
 | [Temporal Guide](docs/capabilities/temporal.md) | All 6 temporal tools, DSL format reference, conflict resolution rules |
-| [Spatial Guide](docs/capabilities/spatial.md) | All 5 spatial tools, SDOM format reference, credential store, browser pool internals |
+| [Spatial Guide](docs/capabilities/spatial.md) | All 6 spatial tools, SDOM format reference, credential store, browser pool internals |
 | [Memory Guide](docs/capabilities/memory.md) | The automatic memory layer, fact formatters, circuit breaker, querying |
 | [Architecture](docs/architecture.md) | Full system diagram, component contracts, life-of-an-email, life-of-an-MCP-call |
 | [Accountability (RAE)](docs/accountability.md) | The human sponsor behind every agent action; L0 (declared) assurance model and claim boundary |

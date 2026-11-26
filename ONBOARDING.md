@@ -67,7 +67,7 @@ Point your agent's MCP client at the SSE endpoint:
 http://machinaparousia.ai:8081/sse
 ```
 
-Your MCP connection carries your account context automatically. Once connected, your agent gains access to **18 tools** across four capability domains (plus automatic memory recording).
+Your MCP connection carries your account context automatically. Once connected, your agent gains access to **23 tools** across four capability domains (plus automatic memory recording).
 
 ---
 
@@ -107,6 +107,7 @@ Triage tools are account-scoped — you can only touch your own mail.
 | `extract_page_state` | Extract full, changes-only, or context-only SDOM from the current page |
 | `fill_credentials` | Fill a stored login into a form on the current site (encrypted vault; you never see the password) |
 | `dump_form` | Inspect a form's fields and options (with captcha detection) — passwords are never returned |
+| `check_egress_ip` | Read-only verification of the agent-called transport: returns the actual egress IP (`{ip, proxy}` — transport by name) via an IP-echo fetch |
 
 ### 🧠 Memory
 
