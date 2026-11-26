@@ -541,11 +541,30 @@ def browse_to_schema() -> dict:
             "forensics: block_vendor, screenshot_path, dom_snapshot. "
             "MP-9: the result also carries 'stealth' (true/false) — whether "
             "full fingerprint hardening (config spatial.stealth_enabled) "
-            "was active for this fetch."
+            "was active for this fetch. "
+            "MP-10a: the optional 'proxy' argument names the transport for "
+            "THIS request from the operator's spatial.proxies menu; '' "
+            "(default) = direct egress, always — a request that does not "
+            "ask NEVER sets a proxy."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
+                "proxy": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "MP-10a: optional named transport (a name from the "
+                        "operator-configured spatial.proxies menu, e.g. "
+                        "'residential-1'). '' or omitted = DIRECT egress, "
+                        "always — proxying is opt-in and per-request. The "
+                        "named proxy is used for this request's browser "
+                        "context (a separate persistent context per "
+                        "(agent, proxy)). Unknown names error with the "
+                        "available list. 'tor' is reserved for a later "
+                        "chunk and is not yet a valid name."
+                    ),
+                },
                 "url": {"type": "string", "description": "URL to navigate to"},
                 "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds. Default: 30000."},
                 "user_agent": {
@@ -576,6 +595,20 @@ def interact_schema() -> dict:
         "inputSchema": {
             "type": "object",
             "properties": {
+                "proxy": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "MP-10a: optional named transport (a name from the "
+                        "operator-configured spatial.proxies menu). '' or "
+                        "omitted = the agent's DEFAULT context (direct "
+                        "egress unless the operator mapped a proxy). The "
+                        "named proxy targets this request's browser context "
+                        "(a separate persistent context per (agent, proxy)) "
+                        "— the interaction runs on that transport's page. "
+                        "Unknown names error with the available list."
+                    ),
+                },
                 "id": {"type": "string", "description": "Element ID to interact with"},
                 "action": {
                     "type": "string",
@@ -778,13 +811,42 @@ class SpatialToolHandlers:
         except Exception as e:
             logger.debug("extra client-hint headers unavailable", extra={"error": str(e)})
 
-    async def _egress_identity(self, page: Any, agent_id: str) -> dict:
+    def _resolve_proxy(self, name: str):
+        """MP-10a (issue #11 ws1, chunk 1 of 3): agent-called transport
+        selection.
+
+        ``name`` comes from the ``proxy`` argument on browse_to/interact.
+        ``''`` → ``("", None)`` — DIRECT egress, always: the default NEVER
+        sets a proxy (the whole point of the opt-in gate; the operator
+        mapping still applies via the pool, exactly as before). A name
+        must exist in the operator's ``spatial.proxies`` menu (a registry
+        of available transports, NOT a routing rule); unknown names —
+        including the reserved ``tor``, which chunk 2 will register —
+        resolve to a clear error listing the available names.
+
+        Returns ``(resolved_url, error_dict)``; exactly one is non-empty.
+        """
+        name = (name or "").strip()
+        if not name:
+            return "", None
+        proxies = getattr(getattr(self.config, "spatial", None), "proxies", None) or {}
+        if name not in proxies:
+            available = ", ".join(sorted(proxies)) if proxies else "(none configured)"
+            return "", {"error": f"unknown proxy name '{name}'; available: {available}"}
+        return str(proxies[name]), None
+
+    async def _egress_identity(self, page: Any, agent_id: str, proxy_name: str = "") -> dict:
         """MP-3 (part A): the egress identity a browse result reports.
 
         Effective UA (read from the page — reflects any per-navigation
         override), the host's effective source IP (no packet sent), and the
         configured egress route (proxy server or "direct"), so an agent can
         tell "site refusing bots" from "wrong egress / site down".
+
+        MP-10a: ``proxy_name`` — the agent-CALLED transport for THIS
+        request. When set, the route reports the NAME (never the resolved
+        URL — registry URLs may embed credentials); the operator mapping
+        below is only the DEFAULT-path report, unchanged from MP-3.
         """
         ua = ""
         try:
@@ -794,14 +856,18 @@ class SpatialToolHandlers:
             cfg = getattr(self.config, "spatial", None)
             ua = getattr(cfg, "user_agent", "") or ""
         proxy = ""
-        try:
-            raw = self.browser_pool.proxy_for(agent_id)
-            # Only a real string counts as a route — anything else
-            # (missing helper, unexpected type) reports "direct".
-            if isinstance(raw, str):
-                proxy = raw
-        except Exception:
-            proxy = ""
+        if proxy_name:
+            # The transport actually used for this request, by NAME.
+            proxy = proxy_name
+        else:
+            try:
+                raw = self.browser_pool.proxy_for(agent_id)
+                # Only a real string counts as a route — anything else
+                # (missing helper, unexpected type) reports "direct".
+                if isinstance(raw, str):
+                    proxy = raw
+            except Exception:
+                proxy = ""
         return {
             "user_agent": ua,
             "ip": _effective_egress_ip(),
@@ -815,8 +881,14 @@ class SpatialToolHandlers:
         timeout_ms = args.get("timeout_ms", 30000)
         extract_mode = args.get("extract_mode", "standard")
         user_agent = args.get("user_agent")
+        # MP-10a: agent-CALLED transport for THIS request (name from the
+        # spatial.proxies menu). '' / omitted = DIRECT, always.
+        proxy_name = (args.get("proxy") or "").strip()
+        proxy_url, proxy_error = self._resolve_proxy(proxy_name)
+        if proxy_error:
+            return proxy_error
 
-        browser = await self.browser_pool.get_browser(agent_id)
+        browser = await self.browser_pool.get_browser(agent_id, override_proxy=proxy_url)
         if not browser:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
@@ -837,10 +909,14 @@ class SpatialToolHandlers:
                 "sdom": sdom.model_dump(),
                 # MP-3: the egress identity this fetch presented — so the
                 # agent can distinguish "refusing bots" from "site down".
-                "egress": await self._egress_identity(page, agent_id),
+                # MP-10a: proxy_name reports the transport actually used.
+                "egress": await self._egress_identity(page, agent_id, proxy_name=proxy_name),
                 # MP-4: captcha presence on the landed page (detect, never
                 # solve) — the agent sees it without a second call.
                 "captcha": await self._detect_captcha(page),
+                # MP-10a: the agent-CALLED transport for this request, by
+                # NAME ("" = direct; never the URL — it may embed creds).
+                "proxy": proxy_name,
                 # MP-9: whether full fingerprint hardening was active for
                 # this fetch (config spatial.stealth_enabled).
                 "stealth": bool(
@@ -887,8 +963,15 @@ class SpatialToolHandlers:
         action = args["action"]
         text = args.get("text")
         timeout_ms = args.get("timeout_ms", 30000)
+        # MP-10a: agent-CALLED transport for THIS request — the interaction
+        # runs on that transport's page (its own persistent context, keyed
+        # by (agent, proxy)). '' / omitted = the agent's DEFAULT context.
+        proxy_name = (args.get("proxy") or "").strip()
+        proxy_url, proxy_error = self._resolve_proxy(proxy_name)
+        if proxy_error:
+            return proxy_error
 
-        browser = await self.browser_pool.get_browser(agent_id)
+        browser = await self.browser_pool.get_browser(agent_id, override_proxy=proxy_url)
         if not browser:
             return {"error": f"Unable to get browser for agent {agent_id}"}
 
@@ -927,6 +1010,9 @@ class SpatialToolHandlers:
                 "id": element_id,
                 "action": action,
                 "success": True,
+                # MP-10a: the agent-CALLED transport for this request, by
+                # NAME ("" = the default context; never the URL).
+                "proxy": proxy_name,
             }
         except Exception as e:
             logger.error("interact failed", extra={"element_id": element_id, "action": action, "error": str(e)})

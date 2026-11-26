@@ -89,6 +89,14 @@ class SpatialConfig(BaseModel):
     proxy_servers: dict[str, str] = Field(default_factory=dict)
     # Default egress proxy for agents with no explicit mapping ("" = direct).
     proxy_default: str = ""
+    # ── MP-10a (issue #11 ws1, chunk 1 of 3): named proxy registry — a
+    # MENU of available transports (name -> proxy URL), never a routing
+    # rule. Agents explicitly call one BY NAME via the `proxy` argument on
+    # browse_to/interact; omitted or "" means DIRECT egress, always.
+    # `proxy_servers`/`proxy_default` above remain the operator-side
+    # per-agent mapping (unchanged, MP-3). "tor" is a reserved name —
+    # chunk 2 will register it; until then it errors as unknown. ──
+    proxies: dict[str, str] = Field(default_factory=dict)
     # ── MP-9: full fingerprint hardening ("stealth") is OPT-IN and OFF by
     # default (issue #15) — ordinary browsing stays exactly as today. When
     # enabled, the pool injects the stealth init script (webdriver →
