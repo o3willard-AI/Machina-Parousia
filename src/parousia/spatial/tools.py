@@ -652,6 +652,13 @@ def interact_schema() -> dict:
                     "description": "Interaction action to perform",
                 },
                 "text": {"type": "string", "description": "Text to type (for 'type' action)"},
+                # MP-13 (Fix 5): the handler reads these (select → value,
+                # press → key) but the schema omitted them, so strict MCP
+                # clients that validate against the schema stripped/rejected
+                # them. Optional here — required-ness is enforced by the
+                # handler per action.
+                "value": {"type": "string", "description": "Option value to select (for 'select' action)"},
+                "key": {"type": "string", "description": "Key to press (for 'press' action)"},
                 "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds. Default: 30000."},
             },
             "required": ["id", "action"],

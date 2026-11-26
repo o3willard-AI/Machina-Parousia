@@ -40,7 +40,11 @@ def test_config_defaults():
     assert cfg.domain == "agents.yourdomain.com"
     assert cfg.redis.port == 6379
     assert cfg.rate_limits.per_agent_per_hour == 100
-    assert cfg.server.rest_port == 8080
+    # MP-13 (Fix 3): rest_host/rest_port are gone — REST is deliberately
+    # internal (hardcoded loopback 127.0.0.1:8080), not configurable.
+    assert not hasattr(cfg.server, "rest_host")
+    assert not hasattr(cfg.server, "rest_port")
+    assert cfg.server.mcp_host == "127.0.0.1"
     assert cfg.server.mcp_port == 8081
 
 

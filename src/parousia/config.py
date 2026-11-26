@@ -33,9 +33,12 @@ class DkimConfig(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    rest_host: str = "127.0.0.1"
-    rest_port: int = 8080
-    mcp_host: str = "0.0.0.0"
+    # MP-13 (Fix 3): rest_host/rest_port are GONE — REST is deliberately
+    # internal and NOT configurable (hardcoded loopback 127.0.0.1:8080 in
+    # serve); the keys were defined but never read. MP-13 (Fix 2):
+    # mcp_host defaults to loopback too (the --mcp-host flag default was
+    # 0.0.0.0 — an operator now opts into a public bind explicitly).
+    mcp_host: str = "127.0.0.1"
     mcp_port: int = 8081
 
 
