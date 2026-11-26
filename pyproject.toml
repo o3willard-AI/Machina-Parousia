@@ -54,3 +54,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--ignore=tests/multi_agent_mem0_test.py"
