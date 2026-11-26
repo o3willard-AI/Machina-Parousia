@@ -70,7 +70,9 @@ Read an agent's email inbox. Messages are stored per-agent in SQLite, delivered 
 
 | Param | Required | Description |
 |-------|----------|-------------|
+| `agent_id` | ❌ | Which inbox to read (defaults to the authenticated account) |
 | `unread_only` | ❌ | If `true`, return only unread messages (default: `true`) |
+| `include_archived` | ❌ | If `true`, include archived messages (default: `false` — archived mail is excluded, so archiving shrinks the listing) |
 | `limit` | ❌ | Max messages to return (default: 20, max: 100) |
 
 **Request:**
@@ -113,6 +115,8 @@ Read an agent's email inbox. Messages are stored per-agent in SQLite, delivered 
 ```
 
 Messages are marked read when returned. To re-read old messages, set `unread_only: false`.
+
+Archived messages are **excluded from the default listing** (`include_archived` defaults to `false`), so `archive()` is a real view state — as a watcher archives handled mail, its `check_inbox` listing shrinks instead of re-reporting the same messages forever. Pass `include_archived: true` to see archived mail.
 
 ---
 
@@ -185,11 +189,21 @@ Triage your own messages by ID. Each is **account-scoped**: the message must be 
 | `archive` | `{"archived": true}` | Marks the message archived |
 | `delete` | `{"deleted": true}` | Permanently removes the message |
 
+`mark_read` and `archive` also accept a bulk **`message_ids`** array (alternative to `message_id`) so a watcher can triage a batch in one round trip — the result is a count (`{"marked": 3, "count": 3}`). The whole batch is refused if any id is foreign or missing (fail-closed: nothing is changed). `delete` stays single-message only.
+
 **Request:**
 ```json
 {
   "tool": "delete",
   "arguments": { "message_id": "msg_abc123" }
+}
+```
+
+**Bulk request:**
+```json
+{
+  "tool": "archive",
+  "arguments": { "message_ids": ["msg_abc123", "msg_def456", "msg_ghi789"] }
 }
 ```
 

@@ -78,11 +78,11 @@ Your MCP connection carries your account context automatically. Once connected, 
 | Tool | What It Does |
 |------|-------------|
 | `send_email` | Send email from `your-agent@machinaparousia.ai` via direct MX delivery (TLS, DKIM-signed) |
-| `check_inbox` | List messages in your inbox |
+| `check_inbox` | List messages in your inbox (archived excluded by default; `include_archived: true` to see them) |
 | `read_message` | Read one message by ID (marks it read) |
 | `wait_for_email` | Wait for a message matching a subject/sender substring — returns it plus its body links (e.g. to open a confirmation URL) |
-| `mark_read` | Mark one of your messages read |
-| `archive` | Archive one of your messages |
+| `mark_read` | Mark one of your messages read (or bulk via `message_ids`) |
+| `archive` | Archive one of your messages (or bulk via `message_ids`) |
 | `delete` | Delete one of your messages |
 
 Triage tools are account-scoped — you can only touch your own mail.

@@ -56,11 +56,11 @@ Agents connect to Parousia via MCP stdio transport — each agent spawns `parous
 | Tool | Description |
 |------|-------------|
 | `send_email` | Send email through Parousia. Rate-limited: 100/hr per agent, 500/day domain-wide. |
-| `check_inbox` | List your inbox. Returns sender, subject, body, received time. Supports `unread_only` and `limit`. |
+| `check_inbox` | List your inbox. Returns sender, subject, body, received time. Supports `unread_only`, `include_archived` (default `false` — archived mail is excluded), and `limit`. |
 | `read_message` | Read one message by ID (marks it read). |
 | `wait_for_email` | Poll your inbox for a message matching a subject/sender substring (within a timeout). Returns the message plus its body links — e.g. to `browse_to` a confirmation URL (double opt-in). |
-| `mark_read` | Mark one of your messages read by ID. |
-| `archive` | Archive one of your messages by ID. |
+| `mark_read` | Mark one of your messages read by ID (or bulk via `message_ids`). |
+| `archive` | Archive one of your messages by ID (or bulk via `message_ids`). |
 | `delete` | Delete one of your messages by ID. |
 
 Triage tools are **account-scoped**: they only ever touch messages stored for the authenticated agent — another agent's message ID is refused.
