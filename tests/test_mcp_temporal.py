@@ -12,6 +12,19 @@ from parousia.temporal.tools import (
     TemporalToolHandlers,
 )
 
+# MP-18: future-anchored test timestamps. The conflict logic filters to
+# future events only (start_range = now), so conflict tests must seed
+# events genuinely in the future. The anchor is frozen once per module
+# load so every _t() call in a test shares one date (no midnight straddle).
+_NOW = datetime.now(timezone.utc)
+
+
+def _t(days_from_now: int, hour: int, minute: int = 0) -> str:
+    """ISO timestamp N days out at the given clock time (date shifts, time preserved)."""
+    return (_NOW + timedelta(days=days_from_now)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    ).isoformat()
+
 
 class TestTemporalToolSchemas:
     """Verify all 5 temporal tool schemas are present and valid."""
@@ -84,8 +97,8 @@ class TestTemporalToolHandlers:
         assert result["mode"] == "planning"
 
     def test_get_temporal_context_includes_conflicts(self, handlers, db, agent_id):
-        db.insert_event({"agent_id": agent_id, "title": "A", "start_time": "2026-06-15T10:00:00", "end_time": "2026-06-15T12:00:00"})
-        db.insert_event({"agent_id": agent_id, "title": "B", "start_time": "2026-06-15T11:00:00", "end_time": "2026-06-15T13:00:00"})
+        db.insert_event({"agent_id": agent_id, "title": "A", "start_time": _t(2, 10), "end_time": _t(2, 12)})
+        db.insert_event({"agent_id": agent_id, "title": "B", "start_time": _t(2, 11), "end_time": _t(2, 13)})
         result = json.loads(handlers.dispatch("get_temporal_context", {}, agent_id))
         assert len(result["conflicts"]) == 1
 
@@ -114,10 +127,10 @@ class TestTemporalToolHandlers:
         assert events[0]["end_time"] == "2026-06-15T12:00:00"
 
     def test_schedule_event_detects_conflicts(self, handlers, db, agent_id):
-        db.insert_event({"agent_id": agent_id, "title": "Existing", "start_time": "2026-06-15T10:00:00", "end_time": "2026-06-15T12:00:00"})
+        db.insert_event({"agent_id": agent_id, "title": "Existing", "start_time": _t(2, 10), "end_time": _t(2, 12)})
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "Overlapping",
-            "start_time": "2026-06-15T11:00:00",
+            "start_time": _t(2, 11),
         }, agent_id))
         assert len(result["conflicts"]) > 0
 
@@ -252,15 +265,15 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": agent_id,
             "title": "Fixed Meeting",
-            "start_time": "2026-06-15T10:00:00",
-            "end_time": "2026-06-15T12:00:00",
+            "start_time": _t(2, 10),
+            "end_time": _t(2, 12),
             "flexibility": "none",
         })
         # Schedule an overlapping event (auto_resolve=True by default)
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "Flexible Chat",
-            "start_time": "2026-06-15T11:00:00",
-            "end_time": "2026-06-15T13:00:00",
+            "start_time": _t(2, 11),
+            "end_time": _t(2, 13),
             "flexibility": "high",
         }, agent_id))
         assert result["scheduled"] is True
@@ -270,20 +283,20 @@ class TestConflictAutoResolution:
         assert moved["moved_title"] == "Flexible Chat"
         assert moved["moved_event_id"] == "e2"
         # Moved event should start after Fixed Meeting ends (12:00)
-        assert "12:00:00" in moved["new_start"] or moved["new_start"] >= "2026-06-15T12:00:00"
+        assert "12:00:00" in moved["new_start"] or moved["new_start"] >= _t(2, 12)
 
     def test_auto_resolve_moves_low_for_none(self, handlers, db, agent_id):
         """A 'low' flex event gives way to a 'none' flex event."""
         db.insert_event({
             "agent_id": agent_id,
             "title": "Immovable",
-            "start_time": "2026-06-15T09:00:00",
-            "end_time": "2026-06-15T10:30:00",
+            "start_time": _t(2, 9),
+            "end_time": _t(2, 10, 30),
             "flexibility": "none",
         })
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "Low Priority",
-            "start_time": "2026-06-15T09:30:00",
+            "start_time": _t(2, 9, 30),
             "flexibility": "low",
         }, agent_id))
         assert result["scheduled"] is True
@@ -296,13 +309,13 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": agent_id,
             "title": "Low Flex",
-            "start_time": "2026-06-15T14:00:00",
-            "end_time": "2026-06-15T15:00:00",
+            "start_time": _t(2, 14),
+            "end_time": _t(2, 15),
             "flexibility": "low",
         })
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "High Flex",
-            "start_time": "2026-06-15T14:30:00",
+            "start_time": _t(2, 14, 30),
             "flexibility": "high",
         }, agent_id))
         assert result["scheduled"] is True
@@ -314,14 +327,14 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": agent_id,
             "title": "Long Event",
-            "start_time": "2026-06-15T16:00:00",
-            "end_time": "2026-06-15T18:00:00",
+            "start_time": _t(2, 16),
+            "end_time": _t(2, 18),
             "flexibility": "high",
         })
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "Short Event",
-            "start_time": "2026-06-15T17:00:00",
-            "end_time": "2026-06-15T17:30:00",
+            "start_time": _t(2, 17),
+            "end_time": _t(2, 17, 30),
             "flexibility": "high",
         }, agent_id))
         assert result["scheduled"] is True
@@ -333,13 +346,13 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": agent_id,
             "title": "Board Meeting",
-            "start_time": "2026-06-15T10:00:00",
-            "end_time": "2026-06-15T12:00:00",
+            "start_time": _t(2, 10),
+            "end_time": _t(2, 12),
             "flexibility": "none",
         })
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "Shareholder Call",
-            "start_time": "2026-06-15T11:00:00",
+            "start_time": _t(2, 11),
             "flexibility": "none",
         }, agent_id))
         assert result["scheduled"] is True
@@ -351,13 +364,13 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": agent_id,
             "title": "Fixed",
-            "start_time": "2026-06-15T10:00:00",
-            "end_time": "2026-06-15T12:00:00",
+            "start_time": _t(2, 10),
+            "end_time": _t(2, 12),
             "flexibility": "none",
         })
         result = json.loads(handlers.dispatch("schedule_event", {
             "title": "Overlap",
-            "start_time": "2026-06-15T11:00:00",
+            "start_time": _t(2, 11),
             "flexibility": "high",
             "auto_resolve": False,
         }, agent_id))
@@ -384,22 +397,22 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": agent_id,
             "title": "E1",
-            "start_time": "2026-06-15T10:00:00",
-            "end_time": "2026-06-15T12:00:00",
+            "start_time": _t(2, 10),
+            "end_time": _t(2, 12),
             "flexibility": "none",
         })
         db.insert_event({
             "agent_id": agent_id,
             "title": "E2",
-            "start_time": "2026-06-15T11:00:00",
-            "end_time": "2026-06-15T11:30:00",
+            "start_time": _t(2, 11),
+            "end_time": _t(2, 11, 30),
             "flexibility": "high",
         })
         db.insert_event({
             "agent_id": agent_id,
             "title": "E3",
-            "start_time": "2026-06-15T11:15:00",
-            "end_time": "2026-06-15T12:30:00",
+            "start_time": _t(2, 11, 15),
+            "end_time": _t(2, 12, 30),
             "flexibility": "high",
         })
         result = json.loads(handlers.dispatch("resolve_conflicts", {}, agent_id))
@@ -417,21 +430,21 @@ class TestConflictAutoResolution:
         db.insert_event({
             "agent_id": "hermes",
             "title": "H Fixed",
-            "start_time": "2026-06-15T10:00:00",
-            "end_time": "2026-06-15T12:00:00",
+            "start_time": _t(2, 10),
+            "end_time": _t(2, 12),
             "flexibility": "none",
         })
         db.insert_event({
             "agent_id": "hermes",
             "title": "H Flex",
-            "start_time": "2026-06-15T11:00:00",
+            "start_time": _t(2, 11),
             "flexibility": "high",
         })
         # Create non-conflicting events for claude
         db.insert_event({
             "agent_id": "claude",
             "title": "C Solo",
-            "start_time": "2026-06-15T14:00:00",
+            "start_time": _t(2, 14),
         })
         result = json.loads(handlers.dispatch("resolve_conflicts", {}, "hermes"))
         assert len(result["resolved"]) == 1
