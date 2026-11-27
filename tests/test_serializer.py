@@ -149,9 +149,11 @@ class TestTemporalSerializer:
     # ── Conflict detection ─────────────────────────────
 
     def test_get_conflicts_no_overlap(self, serializer, db):
-        # Two non-overlapping events
-        db.insert_event({"agent_id": "hermes", "title": "A", "start_time": "2026-06-15T10:00:00", "end_time": "2026-06-15T11:00:00"})
-        db.insert_event({"agent_id": "hermes", "title": "B", "start_time": "2026-06-15T12:00:00", "end_time": "2026-06-15T13:00:00"})
+        # Two non-overlapping events (MP-19: future-anchored so the
+        # future-only filter genuinely sees them — the no-overlap path
+        # must return zero conflicts from a NON-empty future calendar)
+        db.insert_event({"agent_id": "hermes", "title": "A", "start_time": _t(2, 10), "end_time": _t(2, 11)})
+        db.insert_event({"agent_id": "hermes", "title": "B", "start_time": _t(2, 12), "end_time": _t(2, 13)})
         conflicts = serializer.get_conflicts("hermes")
         assert conflicts == []
 
@@ -165,8 +167,11 @@ class TestTemporalSerializer:
         assert "e2" in (c["event_a"], c["event_b"])
 
     def test_get_conflicts_agent_isolation(self, serializer, db):
-        db.insert_event({"agent_id": "hermes", "title": "H", "start_time": "2026-06-15T10:00:00", "end_time": "2026-06-15T12:00:00"})
-        db.insert_event({"agent_id": "claude", "title": "C", "start_time": "2026-06-15T11:00:00", "end_time": "2026-06-15T13:00:00"})
+        # MP-19: future-anchored so both events are inside the future-only
+        # filter's window — if isolation broke (claude's events visible to
+        # hermes), hermes would see 2 overlapping events and get 1 conflict.
+        db.insert_event({"agent_id": "hermes", "title": "H", "start_time": _t(2, 10), "end_time": _t(2, 12)})
+        db.insert_event({"agent_id": "claude", "title": "C", "start_time": _t(2, 11), "end_time": _t(2, 13)})
         conflicts = serializer.get_conflicts("hermes")
         assert conflicts == []  # Claude's events are invisible to hermes
 

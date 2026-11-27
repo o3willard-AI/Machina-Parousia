@@ -381,11 +381,16 @@ class TestConflictAutoResolution:
     # ── resolve_conflicts standalone tool ───────────────
 
     def test_resolve_conflicts_tool_no_conflicts(self, handlers, db, agent_id):
-        """Calling resolve_conflicts on a clean calendar does nothing."""
+        """Calling resolve_conflicts on a clean calendar does nothing.
+
+        MP-19: future-anchored so the "clean calendar" is a genuinely-future
+        clean calendar — the future-only filter sees the Solo event, and the
+        clean result comes from a single non-conflicting event, not from an
+        empty past-filtered set."""
         db.insert_event({
             "agent_id": agent_id,
             "title": "Solo",
-            "start_time": "2026-06-15T10:00:00",
+            "start_time": _t(2, 10),
         })
         result = json.loads(handlers.dispatch("resolve_conflicts", {}, agent_id))
         assert len(result["resolved"]) == 0
