@@ -7,6 +7,19 @@ import pytest
 from parousia.temporal.db import TemporalDB
 from parousia.temporal.serializer import TemporalSerializer
 
+# MP-18: future-anchored test timestamps. The conflict logic filters to
+# future events only (start_range = now), so conflict tests must seed
+# events genuinely in the future. The anchor is frozen once per module
+# load so every _t() call in a test shares one date (no midnight straddle).
+_NOW = datetime.now(timezone.utc)
+
+
+def _t(days_from_now: int, hour: int, minute: int = 0) -> str:
+    """ISO timestamp N days out at the given clock time (date shifts, time preserved)."""
+    return (_NOW + timedelta(days=days_from_now)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    ).isoformat()
+
 
 class TestTemporalSerializer:
     """Test the temporal DSL serializer."""
@@ -143,8 +156,8 @@ class TestTemporalSerializer:
         assert conflicts == []
 
     def test_get_conflicts_overlap(self, serializer, db):
-        db.insert_event({"agent_id": "hermes", "title": "A", "start_time": "2026-06-15T10:00:00", "end_time": "2026-06-15T11:30:00"})
-        db.insert_event({"agent_id": "hermes", "title": "B", "start_time": "2026-06-15T11:00:00", "end_time": "2026-06-15T12:00:00"})
+        db.insert_event({"agent_id": "hermes", "title": "A", "start_time": _t(2, 10), "end_time": _t(2, 11, 30)})
+        db.insert_event({"agent_id": "hermes", "title": "B", "start_time": _t(2, 11), "end_time": _t(2, 12)})
         conflicts = serializer.get_conflicts("hermes")
         assert len(conflicts) == 1
         c = conflicts[0]
